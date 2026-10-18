@@ -1,0 +1,57 @@
+{{define "content" -}}
+{{with .Data -}}
+<h1 class="text-2xl font-bold mb-4">署名</h1>
+{{template "alerts" (dict "Error" .Error)}}
+{{- if .APIEnabled}}<div role="alert" class="alert alert-warning mb-4"><span>管理モードです。ここで発行したら、OSS/BSS の側でも AP の台帳を処理してください（OSS/BSS の台帳とずれます）。</span></div>{{end}}
+{{- with .Issued}}
+<div class="card bg-base-100 shadow mb-6">
+  <div class="card-body">
+    <h2 class="card-title">発行しました <a class="link text-sm font-normal" href="/certs/{{.Cert.Serial}}">証明書の詳細</a></h2>
+    <p class="text-sm">CN {{.Cert.CN}}、シリアル番号 <code class="text-xs">{{.Cert.Serial}}</code>、期限 {{datetime .Cert.NotAfter}}</p>
+    <p class="text-sm font-semibold mt-2">証明書（エッジの画面や AP に取り込む）</p>
+    <textarea readonly rows="8" class="textarea w-full font-mono text-xs" aria-label="証明書">{{$.Data.PEM}}</textarea>
+    <p class="text-sm font-semibold mt-2">署名した CA の証明書（{{.Cert.CAID}}）</p>
+    <textarea readonly rows="6" class="textarea w-full font-mono text-xs" aria-label="CA の証明書">{{$.Data.CAPEM}}</textarea>
+  </div>
+</div>
+{{- end}}
+<div class="card bg-base-100 shadow">
+  <div class="card-body">
+    <p class="text-sm text-base-content/60">CSR から使うのは公開鍵だけです。CN・SAN・EKU・有効期限は、プロファイルと名前から決めます（CSR の Subject と拡張は使いません）。</p>
+    <form method="post" action="/sign" class="grid gap-2" autocomplete="off">
+      <fieldset class="fieldset">
+        <legend class="fieldset-legend">プロファイル</legend>
+        <select name="profile" class="select">
+          {{- $p := .Profile}}
+          <option value="ap-client"{{if eq $p "ap-client"}} selected{{end}}>AP の証明書（ap-client。テナントと AP の名前）</option>
+          <option value="probe-client"{{if eq $p "probe-client"}} selected{{end}}>エッジのヘルスチェック用の証明書（probe-client。テナントとエッジの名前）</option>
+          <option value="tenant-server"{{if eq $p "tenant-server"}} selected{{end}}>エッジのサーバー証明書（tenant-server。テナントとエッジの名前）</option>
+        </select>
+      </fieldset>
+      <fieldset class="fieldset">
+        <legend class="fieldset-legend">テナント</legend>
+        <input name="tenant" value="{{.Tenant}}" list="tenants" required maxlength="32" class="input">
+        <datalist id="tenants">{{range .Tenants}}<option value="{{.}}">{{end}}</datalist>
+      </fieldset>
+      <div class="grid gap-2 md:grid-cols-2">
+        <fieldset class="fieldset">
+          <legend class="fieldset-legend">AP の名前（ap-client のとき）</legend>
+          <input name="ap" value="{{.AP}}" maxlength="32" class="input w-full">
+          <p class="label">エッジの画面で登録する名前と同じ（probe は使えません）</p>
+        </fieldset>
+        <fieldset class="fieldset">
+          <legend class="fieldset-legend">エッジの名前（probe-client・tenant-server のとき）</legend>
+          <input name="edge" value="{{.Edge}}" maxlength="32" class="input w-full">
+          <p class="label">証明書を置くエッジの識別名（英小文字・数字・-）</p>
+        </fieldset>
+      </div>
+      <fieldset class="fieldset">
+        <legend class="fieldset-legend">CSR</legend>
+        <textarea name="csr" rows="8" required class="textarea w-full font-mono text-xs" placeholder="-----BEGIN CERTIFICATE REQUEST-----">{{.CSR}}</textarea>
+      </fieldset>
+      <div><button class="btn btn-primary">署名する</button></div>
+    </form>
+  </div>
+</div>
+{{- end}}
+{{- end}}

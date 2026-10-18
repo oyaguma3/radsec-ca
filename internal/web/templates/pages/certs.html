@@ -1,0 +1,45 @@
+{{define "content" -}}
+{{with .Data -}}
+<h1 class="text-2xl font-bold mb-4">証明書</h1>
+{{template "alerts" (dict "Error" .Error)}}
+<form method="get" action="/certs" class="flex flex-wrap items-end gap-2 mb-4">
+  {{- with .CA}}<input type="hidden" name="ca" value="{{.}}">{{end}}
+  <fieldset class="fieldset"><legend class="fieldset-legend">テナント</legend><input name="tenant" value="{{.Tenant}}" class="input input-sm"></fieldset>
+  <fieldset class="fieldset"><legend class="fieldset-legend">プロファイル</legend>
+    <select name="profile" class="select select-sm">
+      <option value="">すべて</option>
+      {{- $p := .Profile}}
+      {{- range (list "ap-client" "probe-client" "tenant-server")}}<option value="{{.}}"{{if eq . $p}} selected{{end}}>{{profileLabel .}}</option>{{end}}
+    </select></fieldset>
+  <fieldset class="fieldset"><legend class="fieldset-legend">状態</legend>
+    <select name="status" class="select select-sm">
+      <option value="">すべて</option>
+      {{- $s := .Status}}
+      {{- range (list "valid" "revoked" "expired")}}<option value="{{.}}"{{if eq . $s}} selected{{end}}>{{statusLabel .}}</option>{{end}}
+    </select></fieldset>
+  <label class="label mb-2"><input type="checkbox" name="expiring" value="1" class="checkbox checkbox-sm"{{if .Expiring}} checked{{end}}> 30 日以内に期限が切れるもの</label>
+  <button class="btn btn-sm mb-1">絞り込む</button>
+  {{- if .CA}}<span class="badge badge-outline mb-2">CA {{.CA}}</span> <a class="link text-sm mb-2" href="/certs">すべての CA</a>{{end}}
+</form>
+<div class="overflow-x-auto bg-base-100 rounded-box shadow">
+  <table class="table table-sm">
+    <thead><tr><th>シリアル番号</th><th>CN</th><th>プロファイル</th><th>状態</th><th>期限</th><th>発行</th></tr></thead>
+    <tbody>
+      {{- range .Certs}}
+      <tr>
+        <td><a class="link font-mono text-xs" href="/certs/{{.Serial}}">{{short 16 .Serial}}</a></td>
+        <td>{{.CN}}</td>
+        <td class="text-sm">{{profileLabel .Profile}}</td>
+        <td>{{template "cert-status" .State}}{{if .Soon}} <span class="badge badge-warning badge-sm">期限が近い</span>{{end}}</td>
+        <td class="whitespace-nowrap">{{datetime .NotAfter}}</td>
+        <td class="whitespace-nowrap text-sm">{{datetime .CreatedAt}}</td>
+      </tr>
+      {{- else}}
+      <tr><td colspan="6" class="text-base-content/60">証明書はありません。</td></tr>
+      {{- end}}
+    </tbody>
+  </table>
+</div>
+{{- with .Next}}<p class="mt-4"><a class="btn btn-sm" href="{{.}}">次のページ</a></p>{{end}}
+{{- end}}
+{{- end}}

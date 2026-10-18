@@ -1,0 +1,68 @@
+{{define "content" -}}
+{{$role := .Role -}}
+{{with .Data -}}
+<h1 class="text-2xl font-bold mb-4">ダッシュボード</h1>
+<div class="grid gap-4 md:grid-cols-3 mb-6">
+  <div class="card bg-base-100 shadow">
+    <div class="card-body">
+      <h2 class="card-title">設定</h2>
+      <p class="text-sm">組織: {{.Org}}</p>
+      <p class="text-sm">SAN の URI の接頭辞: <code>urn:{{.URNPrefix}}:nas:…</code></p>
+      <p class="text-sm">スロットのドメイン: <code>{{.DNSDomain}}</code></p>
+      <p class="text-sm text-base-content/60">エッジ（EDGE_URN_PREFIX・EDGE_DNS_DOMAIN）と同じ値にそろえます。</p>
+    </div>
+  </div>
+  <div class="card bg-base-100 shadow">
+    <div class="card-body">
+      <h2 class="card-title">鍵と API</h2>
+      <p class="text-sm">KEK の識別子: <code>{{.KEKID}}</code></p>
+      <p class="text-sm">管理API: {{if .APIEnabled}}<span class="badge badge-success badge-sm">待ち受け中</span>（管理モード）{{else}}<span class="badge badge-ghost badge-sm">止めています</span>（単独モード）{{end}}</p>
+    </div>
+  </div>
+  <div class="card bg-base-100 shadow">
+    <div class="card-body">
+      <h2 class="card-title">期限の近い証明書</h2>
+      <p class="text-3xl font-bold">{{.ExpiringSoon}}</p>
+      <p class="text-sm text-base-content/60">30 日以内に期限の切れる有効な証明書。<a class="link" href="/certs?expiring=1">一覧</a></p>
+    </div>
+  </div>
+</div>
+
+<div class="overflow-x-auto bg-base-100 rounded-box shadow mb-6">
+  <table class="table table-sm">
+    <thead><tr><th>CA</th><th>状態</th><th>期限</th><th>発行</th><th>CRL</th></tr></thead>
+    <tbody>
+      {{- range .CAs}}
+      <tr>
+        <td><a class="link" href="/cas/{{.ID}}">{{.ID}}</a><div class="text-xs text-base-content/60">{{.Subject}}</div></td>
+        <td>{{if eq .Status "active"}}<span class="badge badge-success badge-sm">発行中</span>{{else}}<span class="badge badge-ghost badge-sm">停止</span>{{end}}</td>
+        <td class="whitespace-nowrap">{{datetime .NotAfter}}</td>
+        <td><a class="link" href="/certs?ca={{.ID}}">{{.Issued}}</a></td>
+        <td class="text-sm">{{with .CRL}}#{{.Number}}、次の更新 {{datetime .NextUpdate}}{{else}}-{{end}}
+          {{- if .CRLWarn}} <span class="badge badge-warning badge-sm">nextUpdate まで 3 日を切りました</span>{{end}}
+          {{- with .CRLError}}<div class="text-error text-xs">作り直しに失敗: {{.}}</div>{{end}}</td>
+      </tr>
+      {{- end}}
+    </tbody>
+  </table>
+</div>
+
+{{- if isAdmin $role}}
+<div class="card bg-base-100 shadow">
+  <div class="card-body">
+    <h2 class="card-title">テナントのクライアントCA の作成</h2>
+    {{template "alerts" (dict "Error" .Error)}}
+    {{- if .APIEnabled}}<p class="text-sm text-warning">管理モードでは、テナントのクライアントCA は OSS/BSS から作ります（ここで作ると OSS/BSS の台帳とずれます）。</p>{{end}}
+    <form method="post" action="/cas" class="flex flex-wrap items-end gap-2" autocomplete="off">
+      <fieldset class="fieldset">
+        <legend class="fieldset-legend">テナントの名前（slug）</legend>
+        <input name="tenant" value="{{.Tenant}}" required maxlength="32" class="input">
+        <p class="label">エッジのテナントと同じ名前（英小文字・数字・-）。CA の ID は tenant.&lt;名前&gt; になります</p>
+      </fieldset>
+      <button class="btn btn-primary mb-6">作成する</button>
+    </form>
+  </div>
+</div>
+{{- end}}
+{{- end}}
+{{- end}}

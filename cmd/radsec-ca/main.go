@@ -19,7 +19,9 @@ import (
 	// distroless のイメージにはタイムゾーンのデータがないので、埋め込んで環境変数 TZ を効かせる。
 	_ "time/tzdata"
 
+	"github.com/oyaguma3/radsec-ca/internal/access"
 	"github.com/oyaguma3/radsec-ca/internal/api"
+	"github.com/oyaguma3/radsec-ca/internal/auth"
 	"github.com/oyaguma3/radsec-ca/internal/ca"
 	"github.com/oyaguma3/radsec-ca/internal/certs"
 	"github.com/oyaguma3/radsec-ca/internal/config"
@@ -28,6 +30,7 @@ import (
 	"github.com/oyaguma3/radsec-ca/internal/publish"
 	"github.com/oyaguma3/radsec-ca/internal/server"
 	"github.com/oyaguma3/radsec-ca/internal/signer"
+	"github.com/oyaguma3/radsec-ca/internal/web"
 )
 
 // version はビルド時に -ldflags "-X main.version=..." で埋め込む。
@@ -149,6 +152,13 @@ func start(ctx context.Context) (*app, error) {
 	if created {
 		log.Info("created the server CA", "ca", signer.ServerCAID)
 	}
+	// 最初の管理者（§10.1）。役割を変えられていたり無効にされていたりしたら戻す（締め出されたときに戻す経路）。
+	if changed, err := d.EnsureInitialAdmin(ctx, cfg.InitialAdminEmail); err != nil {
+		d.Close()
+		return nil, err
+	} else if changed {
+		log.Warn("the initial admin was created or restored to an enabled admin", "email", cfg.InitialAdminEmail)
+	}
 	return &app{cfg: cfg, log: log, db: d, signer: sig, ca: svc}, nil
 }
 
@@ -162,17 +172,18 @@ func serve(ctx context.Context) error {
 	defer cancel()
 	go a.ca.Run(ctx)
 
-	mux := http.NewServeMux()
-	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
-		if err := a.db.Ping(r.Context()); err != nil {
-			http.Error(w, "db is not available", http.StatusServiceUnavailable)
-			return
-		}
-		fmt.Fprintln(w, "ok")
-	})
+	ident, err := newIdentifier(ctx, a.cfg, a.log)
+	if err != nil {
+		return err
+	}
+	gui, err := web.New(web.Options{Log: a.log.With("listener", "gui"), Version: version, KEKID: a.signer.KEK.ID(), DB: a.db, CA: a.ca,
+		Identifier: ident, InitialAdmin: a.cfg.InitialAdminEmail, APIEnabled: a.cfg.APIEnabled()})
+	if err != nil {
+		return err
+	}
 	runs := []func(context.Context) error{
 		func(ctx context.Context) error {
-			return server.Run(ctx, server.Options{Addr: a.cfg.GUIAddr, Handler: mux, Log: a.log.With("listener", "gui")})
+			return server.Run(ctx, server.Options{Addr: a.cfg.GUIAddr, Handler: gui.Routes(), Log: a.log.With("listener", "gui")})
 		},
 		func(ctx context.Context) error {
 			h := &publish.Handler{Log: a.log, DB: a.db}
@@ -211,6 +222,26 @@ func (a *app) apiRunner() (func(context.Context) error, error) {
 		return api.Run(ctx, api.ListenOptions{Addr: a.cfg.APIAddr, GetCertificate: f.GetCertificate, AdminClients: clients,
 			Handler: h.Routes(), Log: a.log.With("listener", "api")})
 	}, nil
+}
+
+// newIdentifier は、画面の要求から利用者を決める方法を作る（Cloudflare Access の JWT、または開発用の設定）。
+func newIdentifier(ctx context.Context, cfg config.Config, log *slog.Logger) (auth.Identifier, error) {
+	if cfg.DevMode() {
+		log.Warn("development mode: requests are not authenticated; every request acts as the development user "+
+			"(CA_DEV_USER_EMAIL). Do not use this setting in production", "email", cfg.DevUserEmail, "addr", cfg.GUIAddr)
+		return auth.Dev(cfg.DevUserEmail), nil
+	}
+	v, err := access.New(access.Options{TeamDomain: cfg.AccessTeamDomain, AUDs: cfg.AccessAUDs,
+		HTTPClient: &http.Client{Timeout: 10 * time.Second}})
+	if err != nil {
+		return nil, err
+	}
+	if n, err := v.Refresh(ctx); err != nil {
+		log.Warn("cannot fetch Cloudflare Access public keys; will retry on the first request", "url", v.CertsURL(), "error", err)
+	} else {
+		log.Info("cloudflare access", "team_domain", cfg.AccessTeamDomain, "auds", len(cfg.AccessAUDs), "keys", n)
+	}
+	return auth.Access(v), nil
 }
 
 // runAll は fns を並べて動かし、どれかが終われば（失敗しても）ほかも止めて、最初の誤りを返す。

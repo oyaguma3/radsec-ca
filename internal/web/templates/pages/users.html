@@ -1,0 +1,48 @@
+{{define "content" -}}
+{{with .Data -}}
+<h1 class="text-2xl font-bold mb-4">利用者</h1>
+{{template "alerts" (dict "Message" .Message "Error" .Error)}}
+<p class="text-sm text-base-content/60 mb-4">画面を開けるのは、Cloudflare Access で許した上で、ここに登録した有効な利用者だけです。admin はすべての操作、viewer は見るだけです。</p>
+<div class="overflow-x-auto bg-base-100 rounded-box shadow mb-6">
+  <table class="table table-sm">
+    <thead><tr><th>メールアドレス</th><th>役割と有効・無効</th><th>更新</th></tr></thead>
+    <tbody>
+      {{- $initial := .InitialAdmin}}
+      {{- range .Users}}
+      <tr>
+        <td>{{.Email}}{{if eq .Email $initial}} <span class="badge badge-outline badge-sm">最初の管理者</span>{{end}}</td>
+        <td>
+          {{- if eq .Email $initial}}admin・有効（変えられません）
+          {{- else}}
+          <form method="post" action="/users/{{.Email}}/update" class="flex flex-wrap items-center gap-2">
+            <select name="role" class="select select-sm" aria-label="役割">
+              <option value="admin"{{if eq .Role "admin"}} selected{{end}}>admin</option>
+              <option value="viewer"{{if eq .Role "viewer"}} selected{{end}}>viewer</option>
+            </select>
+            <select name="enabled" class="select select-sm" aria-label="有効・無効">
+              <option value="1"{{if .Enabled}} selected{{end}}>有効</option>
+              <option value="0"{{if not .Enabled}} selected{{end}}>無効</option>
+            </select>
+            <button class="btn btn-sm">変える</button>
+          </form>
+          {{- end}}
+        </td>
+        <td class="whitespace-nowrap text-sm">{{datetime .UpdatedAt}}</td>
+      </tr>
+      {{- end}}
+    </tbody>
+  </table>
+</div>
+<div class="card bg-base-100 shadow">
+  <div class="card-body">
+    <h2 class="card-title">追加</h2>
+    <form method="post" action="/users" class="flex flex-wrap items-end gap-2" autocomplete="off">
+      <fieldset class="fieldset"><legend class="fieldset-legend">メールアドレス</legend><input name="email" value="{{.Email}}" required maxlength="64" class="input"></fieldset>
+      <fieldset class="fieldset"><legend class="fieldset-legend">役割</legend>
+        <select name="role" class="select"><option value="viewer"{{if eq .Role "viewer"}} selected{{end}}>viewer</option><option value="admin"{{if eq .Role "admin"}} selected{{end}}>admin</option></select></fieldset>
+      <button class="btn btn-primary mb-1">追加する</button>
+    </form>
+  </div>
+</div>
+{{- end}}
+{{- end}}

@@ -1,0 +1,48 @@
+{{define "content" -}}
+{{$role := .Role -}}
+{{with .Data -}}
+<div class="breadcrumbs text-sm mb-2"><ul><li><a href="/">ダッシュボード</a></li><li>{{.ID}}</li></ul></div>
+<h1 class="text-2xl font-bold mb-4">CA {{.ID}}{{if eq .Status "disabled"}} <span class="badge badge-ghost align-middle">停止</span>{{end}}</h1>
+{{template "alerts" (dict "Message" .Message "Error" .Error)}}
+<div class="card bg-base-100 shadow mb-6">
+  <div class="card-body">
+    <table class="table table-sm">
+      <tbody>
+        <tr><th class="w-48">Subject</th><td>{{.Subject}}</td></tr>
+        <tr><th>種類</th><td>{{if eq .Kind "server"}}サーバーCA（テナントのサーバー証明書を発行）{{else}}テナント {{.Tenant}} のクライアントCA（AP とヘルスチェック用の証明書を発行）{{end}}</td></tr>
+        <tr><th>シリアル番号</th><td><code class="text-xs">{{with .Cert}}{{.SerialNumber.Text 16}}{{end}}</code></td></tr>
+        <tr><th>期限</th><td>{{datetime .NotAfter}}</td></tr>
+        <tr><th>発行した証明書</th><td><a class="link" href="/certs?ca={{.ID}}">{{.Issued}} 件</a></td></tr>
+        <tr><th>配布の口</th><td><code>/ca/{{.ID}}.pem</code>、<code>/crl/{{.ID}}.pem</code>（8449）</td></tr>
+        {{- if eq .Status "disabled"}}<tr><th>停止した時刻</th><td>{{datetime .DisabledAt}}</td></tr>{{end}}
+      </tbody>
+    </table>
+    <p><a class="btn btn-sm" href="/cas/{{.ID}}/ca.pem">CA の証明書を取り出す</a></p>
+    <textarea readonly rows="6" class="textarea w-full font-mono text-xs" aria-label="CA の証明書">{{.PEM}}</textarea>
+  </div>
+</div>
+
+<div class="card bg-base-100 shadow mb-6">
+  <div class="card-body">
+    <h2 class="card-title">CRL の履歴（直近 30 個）</h2>
+    {{- with .CRLError}}<p class="text-error">作り直しに失敗しています: {{.}}</p>{{end}}
+    <table class="table table-sm">
+      <thead><tr><th>番号</th><th>thisUpdate</th><th>nextUpdate</th><th></th></tr></thead>
+      <tbody>
+        {{- $id := .ID}}
+        {{- range .CRLs}}
+        <tr><td>{{.Number}}</td><td>{{datetime .ThisUpdate}}</td><td>{{datetime .NextUpdate}}</td><td><a class="link" href="/cas/{{$id}}/crls/{{.Number}}">取り出す</a></td></tr>
+        {{- end}}
+      </tbody>
+    </table>
+  </div>
+</div>
+
+{{- if and (isAdmin $role) (eq .Kind "tenant-client") (eq .Status "active")}}
+<form id="ca-disable" method="post" action="/cas/{{.ID}}/disable"></form>
+<button type="button" class="btn btn-error btn-outline" command="show-modal" commandfor="dialog-disable">この CA を停止する（テナントをやめる）</button>
+{{template "confirm" (dict "ID" "dialog-disable" "Title" "CA の停止" "Form" "ca-disable" "Label" "停止する" "Class" "btn-error"
+  "Message" (printf "CA %s を停止します。発行を止め、有効な証明書をすべて cessationOfOperation で失効させます（取り消せません）。CRL は作り続けます。よろしいですか？" .ID))}}
+{{- end}}
+{{- end}}
+{{- end}}

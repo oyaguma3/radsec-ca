@@ -1,0 +1,47 @@
+{{define "content" -}}
+{{$role := .Role -}}
+{{with .Data -}}
+<div class="breadcrumbs text-sm mb-2"><ul><li><a href="/certs">証明書</a></li><li>{{short 16 .Serial}}</li></ul></div>
+<h1 class="text-2xl font-bold mb-4">証明書 {{.CN}} {{template "cert-status" .State}}</h1>
+{{template "alerts" (dict "Message" .Message "Error" .Error)}}
+<div class="card bg-base-100 shadow mb-6">
+  <div class="card-body">
+    <table class="table table-sm">
+      <tbody>
+        <tr><th class="w-48">シリアル番号</th><td><code class="text-xs">{{.Serial}}</code></td></tr>
+        <tr><th>プロファイル</th><td>{{profileLabel .Profile}}</td></tr>
+        <tr><th>署名した CA</th><td><a class="link" href="/cas/{{.CAID}}">{{.CAID}}</a></td></tr>
+        <tr><th>名前の材料</th><td>テナント {{.Tenant}}{{with .AP}}、AP {{.}}{{end}}{{with .Edge}}、エッジ {{.}}{{end}}</td></tr>
+        <tr><th>CN</th><td>{{.CN}}</td></tr>
+        {{- with .SANDNS}}<tr><th>SAN（DNS）</th><td>{{range $i, $d := .}}{{if $i}}、{{end}}<code>{{$d}}</code>{{end}}</td></tr>{{end}}
+        {{- with .SANURI}}<tr><th>SAN（URI）</th><td><code>{{.}}</code></td></tr>{{end}}
+        <tr><th>有効期間</th><td>{{datetime .NotBefore}} 〜 {{datetime .NotAfter}}{{if .Soon}} <span class="badge badge-warning badge-sm">期限が近い</span>{{end}}</td></tr>
+        <tr><th>公開鍵の SHA-256</th><td><code class="text-xs break-all">{{.PubKeySHA256}}</code></td></tr>
+        <tr><th>発行</th><td>{{datetime .CreatedAt}}（{{.IssuedBy}}）</td></tr>
+        {{- if eq .State "revoked"}}<tr><th>失効</th><td>{{datetime .RevokedAt}}（{{.RevokeReason}}）</td></tr>{{end}}
+      </tbody>
+    </table>
+    <p><a class="btn btn-sm" href="/certs/{{.Serial}}/cert.pem">証明書を取り出す</a></p>
+    <textarea readonly rows="8" class="textarea w-full font-mono text-xs" aria-label="証明書">{{.PEM}}</textarea>
+  </div>
+</div>
+{{- if and (isAdmin $role) (ne .State "revoked")}}
+<div class="card bg-base-100 shadow">
+  <div class="card-body">
+    <h2 class="card-title">失効</h2>
+    {{- if .APIEnabled}}<p class="text-sm text-warning">管理モードです。ここで失効させたら、OSS/BSS の側でも AP の台帳を処理してください（OSS/BSS の台帳とずれます）。</p>{{end}}
+    <p class="text-sm text-base-content/60">失効は取り消せません。間違えたら新しい証明書を発行します。失効させると CRL をすぐ作り直します。</p>
+    <form id="cert-revoke" method="post" action="/certs/{{.Serial}}/revoke" class="flex flex-wrap items-end gap-2">
+      <fieldset class="fieldset">
+        <legend class="fieldset-legend">理由</legend>
+        <select name="reason" class="select">{{range .Reasons}}<option value="{{.Value}}">{{.Label}}</option>{{end}}</select>
+      </fieldset>
+      <button type="button" class="btn btn-error mb-1" command="show-modal" commandfor="dialog-revoke">失効させる</button>
+    </form>
+    {{template "confirm" (dict "ID" "dialog-revoke" "Title" "失効" "Form" "cert-revoke" "Label" "失効させる" "Class" "btn-error"
+      "Message" (printf "証明書 %s（%s）を失効させます。取り消せません。よろしいですか？" .CN .Serial))}}
+  </div>
+</div>
+{{- end}}
+{{- end}}
+{{- end}}

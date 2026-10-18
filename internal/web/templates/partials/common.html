@@ -1,0 +1,30 @@
+{{/* 複数の画面で使う部品。すべてのページから使える。 */}}
+
+{{/* alerts は画面の上部の成功とエラーの文。引数は dict で Message、Error。 */}}
+{{define "alerts" -}}
+{{- with .Message}}<div role="status" class="alert alert-success mb-4"><span>{{.}}</span></div>{{end}}
+{{- with .Error}}<div role="alert" class="alert alert-error mb-4"><span class="whitespace-pre-wrap">{{.}}</span></div>{{end}}
+{{- end}}
+
+{{/* confirm は確認ダイアログ。開くボタンは command="show-modal" commandfor="ID" を持つ。
+     引数は dict で ID、Title、Message、Form（確認のボタンで送るフォームの id）、Label（確認のボタンの文字）、Class（ボタンの色）。 */}}
+{{define "confirm" -}}
+<dialog id="{{.ID}}" class="modal">
+  <div class="modal-box">
+    <h3 class="text-lg font-bold">{{.Title}}</h3>
+    <p class="py-4">{{.Message}}</p>
+    <div class="modal-action">
+      <form method="dialog"><button class="btn">やめる</button></form>
+      <button type="submit" form="{{.Form}}" class="btn {{.Class}}">{{.Label}}</button>
+    </div>
+  </div>
+  <form method="dialog" class="modal-backdrop"><button>閉じる</button></form>
+</dialog>
+{{- end}}
+
+{{/* cert-status は証明書の状態のバッジ（引数は状態の文字列）。 */}}
+{{define "cert-status" -}}
+{{- if eq . "valid"}}<span class="badge badge-success badge-sm">{{statusLabel .}}</span>
+{{- else if eq . "revoked"}}<span class="badge badge-error badge-sm">{{statusLabel .}}</span>
+{{- else}}<span class="badge badge-ghost badge-sm">{{statusLabel .}}</span>{{end -}}
+{{- end}}

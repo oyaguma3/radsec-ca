@@ -202,3 +202,8 @@ func serialHex(c *x509.Certificate) string { return c.SerialNumber.Text(16) }
 func CertPEM(der []byte) []byte {
 	return pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
 }
+
+// Audit は ca の外の操作（利用者の変更、KEK の入れ替え、バックアップ）の監査ログを書く。
+func (s *Service) Audit(ctx context.Context, a Actor, action, target string, detail map[string]any) {
+	s.audit(ctx, a, action, target, "ok", detail)
+}
