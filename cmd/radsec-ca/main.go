@@ -19,6 +19,7 @@ import (
 	// distroless のイメージにはタイムゾーンのデータがないので、埋め込んで環境変数 TZ を効かせる。
 	_ "time/tzdata"
 
+	"github.com/oyaguma3/radsec-ca/internal/api"
 	"github.com/oyaguma3/radsec-ca/internal/ca"
 	"github.com/oyaguma3/radsec-ca/internal/certs"
 	"github.com/oyaguma3/radsec-ca/internal/config"
@@ -169,7 +170,7 @@ func serve(ctx context.Context) error {
 		}
 		fmt.Fprintln(w, "ok")
 	})
-	return runAll(ctx, cancel,
+	runs := []func(context.Context) error{
 		func(ctx context.Context) error {
 			return server.Run(ctx, server.Options{Addr: a.cfg.GUIAddr, Handler: mux, Log: a.log.With("listener", "gui")})
 		},
@@ -177,7 +178,39 @@ func serve(ctx context.Context) error {
 			h := &publish.Handler{Log: a.log, DB: a.db}
 			return server.Run(ctx, server.Options{Addr: a.cfg.PublishAddr, Handler: h.Routes(), Log: a.log.With("listener", "publish")})
 		},
-	)
+	}
+	if a.cfg.APIEnabled() {
+		run, err := a.apiRunner()
+		if err != nil {
+			return err
+		}
+		runs = append(runs, run)
+	} else {
+		a.log.Info("the management API is disabled (CA_ADMIN_CLIENTS is empty)")
+	}
+	return runAll(ctx, cancel, runs...)
+}
+
+// apiRunner は管理API（mTLS）のリスナーを用意する。サーバー証明書がなければ自己署名で作る（§9.1）。
+func (a *app) apiRunner() (func(context.Context) error, error) {
+	certPath, keyPath := filepath.Join(a.cfg.TLSDir, "server.pem"), filepath.Join(a.cfg.TLSDir, "server.key")
+	if created, err := certs.EnsureFiles(certPath, keyPath, a.cfg.TLSHosts); err != nil {
+		return nil, err
+	} else if created {
+		a.log.Info("created a self-signed server certificate for the management API", "hosts", a.cfg.TLSHosts)
+	}
+	f, err := certs.LoadFile(certPath, keyPath, a.log)
+	if err != nil {
+		return nil, err
+	}
+	a.log.Info("management API", "fingerprint", certs.Fingerprint(f.Leaf()), "not_after", f.Leaf().NotAfter, "admin_clients", len(a.cfg.AdminClients))
+	clients := a.cfg.AdminClients
+	h := &api.Handler{Log: a.log.With("listener", "api"), DB: a.db, CA: a.ca, Version: version, KEKID: a.signer.KEK.ID(),
+		MgmtClient: func(r *http.Request) string { return api.AdminClientName(r, clients) }}
+	return func(ctx context.Context) error {
+		return api.Run(ctx, api.ListenOptions{Addr: a.cfg.APIAddr, GetCertificate: f.GetCertificate, AdminClients: clients,
+			Handler: h.Routes(), Log: a.log.With("listener", "api")})
+	}, nil
 }
 
 // runAll は fns を並べて動かし、どれかが終われば（失敗しても）ほかも止めて、最初の誤りを返す。

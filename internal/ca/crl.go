@@ -183,10 +183,14 @@ func (s *Service) CRLErrors() map[string]string {
 	return maps.Clone(s.crlErrors)
 }
 
-// Run は CRL の作り直しの定期の処理を、ctx が終わるまで 1 分ごとに動かす（起動したときにも 1 回行う）。
+// Run は定期の処理（CRL の作り直しと、期限の切れた冪等の記録の削除）を、ctx が終わるまで 1 分ごとに動かす
+// （起動したときにも 1 回行う）。
 func (s *Service) Run(ctx context.Context) {
 	for {
 		s.RefreshCRLs(ctx)
+		if _, err := s.DB.PurgeIdempotency(ctx); err != nil && ctx.Err() == nil {
+			s.Log.Warn("cannot purge idempotency records", "error", err)
+		}
 		select {
 		case <-ctx.Done():
 			return

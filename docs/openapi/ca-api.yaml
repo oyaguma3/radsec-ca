@@ -1,0 +1,509 @@
+openapi: 3.1.0
+info:
+  title: radsec-ca 管理API
+  version: 0.1.0
+  description: |
+    radsec-ca（RadSec のエッジのための独立した CA）の管理API（設計概要 §9）。呼び出し側は eapaka-node-provisioner だけで、全権として扱う。
+
+    - 認証は mTLS。管理クライアントの証明書の SHA-256 フィンガープリントを、本CA の `CA_ADMIN_CLIENTS` と照合する（CA は使わない）。
+      証明書なし・未登録・有効期間外の接続は TLS のハンドシェイクで断る。サーバー証明書は自己署名（`radsec-ca server-cert` で取り出す）。
+    - `X-Operator-Id`（任意）は監査ログの操作者になる。`X-Trace-ID`（任意）は受け取るか採番し、応答のヘッダーで返す。
+    - 変更の口（CA の作成と停止、発行、失効）は `Idempotency-Key` が必須。同じ鍵・同じ本文の再送には前の応答を返し
+      （`Idempotent-Replayed: true`）、本文が違えば 409 `IDEMPOTENCY_CONFLICT`。応答は 24 時間覚える（5xx は覚えない）。
+    - 証明書の CN・SAN・EKU・有効期限は、プロファイルと名前の材料（テナント、AP、エッジ）から本CA が決める。CSR から使うのは公開鍵だけ。
+    - エラーは ProblemDetails（`application/problem+json`）で、`cause` に理由の符号を入れる。
+servers:
+  - url: https://{host}:9448
+    variables:
+      host:
+        default: localhost
+paths:
+  /status:
+    get:
+      summary: 本CA の状態
+      operationId: getStatus
+      parameters:
+        - $ref: "#/components/parameters/TraceID"
+      responses:
+        "200":
+          description: 状態
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Status"
+  /cas:
+    get:
+      summary: CA の一覧
+      operationId: listCAs
+      responses:
+        "200":
+          description: CA の一覧（server が先頭）
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/CA"
+    post:
+      summary: テナントのクライアントCA（tenant.<slug>）の作成
+      operationId: createCA
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+        - $ref: "#/components/parameters/OperatorID"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [tenant]
+              properties:
+                tenant:
+                  $ref: "#/components/schemas/Name"
+      responses:
+        "201":
+          description: 作った CA（最初の CRL も作る）
+          headers:
+            Location:
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CA"
+        "400":
+          $ref: "#/components/responses/Problem"
+        "409":
+          description: CA_EXISTS（すでにある）、IDEMPOTENCY_CONFLICT
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+  /cas/{caId}:
+    get:
+      summary: CA の詳細（証明書の PEM を含む）
+      operationId: getCA
+      parameters:
+        - $ref: "#/components/parameters/CAID"
+      responses:
+        "200":
+          description: CA
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CA"
+        "404":
+          $ref: "#/components/responses/Problem"
+  /cas/{caId}/disable:
+    post:
+      summary: テナントをやめる（発行を止め、有効な証明書を cessationOfOperation で失効させる。CRL は作り続ける）
+      operationId: disableCA
+      parameters:
+        - $ref: "#/components/parameters/CAID"
+        - $ref: "#/components/parameters/IdempotencyKey"
+        - $ref: "#/components/parameters/OperatorID"
+      responses:
+        "200":
+          description: 停止した CA（停止していれば、そのまま返す）
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CA"
+        "400":
+          $ref: "#/components/responses/Problem"
+        "404":
+          $ref: "#/components/responses/Problem"
+  /cas/{caId}/crl:
+    get:
+      summary: 最新の CRL（配布の口と同じ中身）
+      operationId: getCRL
+      parameters:
+        - $ref: "#/components/parameters/CAID"
+      responses:
+        "200":
+          description: CRL
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [caId, number, thisUpdate, nextUpdate, crl]
+                properties:
+                  caId:
+                    type: string
+                  number:
+                    type: integer
+                  thisUpdate:
+                    type: string
+                    format: date-time
+                  nextUpdate:
+                    type: string
+                    format: date-time
+                  crl:
+                    type: string
+                    description: PEM（X509 CRL）
+        "404":
+          $ref: "#/components/responses/Problem"
+  /certs:
+    get:
+      summary: 証明書の一覧（新しく発行した順）
+      operationId: listCerts
+      parameters:
+        - name: tenant
+          in: query
+          schema:
+            $ref: "#/components/schemas/Name"
+        - name: profile
+          in: query
+          schema:
+            $ref: "#/components/schemas/Profile"
+        - name: ap
+          in: query
+          schema:
+            $ref: "#/components/schemas/Name"
+        - name: edge
+          in: query
+          schema:
+            $ref: "#/components/schemas/Name"
+        - name: status
+          in: query
+          schema:
+            type: string
+            enum: [valid, revoked, expired]
+        - name: expiresBefore
+          in: query
+          description: この時刻より前に期限が切れる有効な証明書
+          schema:
+            type: string
+            format: date-time
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 500
+            default: 100
+        - name: after
+          in: query
+          description: 前のページの next の値
+          schema:
+            type: string
+      responses:
+        "200":
+          description: 証明書の一覧
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/Cert"
+                  next:
+                    type: string
+                    description: 続きがあれば、次の要求の after に渡す値
+        "400":
+          $ref: "#/components/responses/Problem"
+    post:
+      summary: 発行（プロファイルと名前の材料と CSR）
+      operationId: issueCert
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+        - $ref: "#/components/parameters/OperatorID"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [profile, tenant, csr]
+              description: |
+                ap-client は tenant と ap、probe-client と tenant-server は tenant と edge を与える。
+                署名する CA は、ap-client と probe-client は tenant.<tenant>、tenant-server は server。
+              properties:
+                profile:
+                  $ref: "#/components/schemas/Profile"
+                tenant:
+                  $ref: "#/components/schemas/Name"
+                ap:
+                  $ref: "#/components/schemas/Name"
+                edge:
+                  $ref: "#/components/schemas/Name"
+                csr:
+                  type: string
+                  description: PEM の CSR（16 KB まで。ECDSA P-256 / P-384、RSA 2048〜4096 ビット）。使うのは公開鍵だけ
+      responses:
+        "201":
+          description: 発行した証明書（署名した CA の証明書を含む）
+          headers:
+            Location:
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Cert"
+        "400":
+          $ref: "#/components/responses/Problem"
+        "404":
+          description: CA_NOT_FOUND（テナントのクライアントCA がない）
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+        "409":
+          description: CA_DISABLED、IDEMPOTENCY_CONFLICT
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+        "422":
+          description: CSR_INVALID、KEY_TYPE_UNSUPPORTED、NAME_RESERVED（ap-client の AP の名前 probe）
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+  /certs/{serial}:
+    get:
+      summary: 証明書の詳細
+      operationId: getCert
+      parameters:
+        - $ref: "#/components/parameters/Serial"
+      responses:
+        "200":
+          description: 証明書
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Cert"
+        "404":
+          $ref: "#/components/responses/Problem"
+  /certs/{serial}/revoke:
+    post:
+      summary: 失効（CRL をすぐ作り直す。失効していれば何もせず、そのまま返す）
+      operationId: revokeCert
+      parameters:
+        - $ref: "#/components/parameters/Serial"
+        - $ref: "#/components/parameters/IdempotencyKey"
+        - $ref: "#/components/parameters/OperatorID"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [reason]
+              properties:
+                reason:
+                  type: string
+                  enum: [unspecified, keyCompromise, superseded, cessationOfOperation]
+      responses:
+        "200":
+          description: 失効させた証明書
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Cert"
+        "400":
+          $ref: "#/components/responses/Problem"
+        "404":
+          $ref: "#/components/responses/Problem"
+components:
+  parameters:
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: true
+      schema:
+        type: string
+        pattern: "^[\\x21-\\x7E]{1,128}$"
+    OperatorID:
+      name: X-Operator-Id
+      in: header
+      schema:
+        type: string
+        pattern: "^[A-Za-z0-9._@-]{1,64}$"
+    TraceID:
+      name: X-Trace-ID
+      in: header
+      schema:
+        type: string
+    CAID:
+      name: caId
+      in: path
+      required: true
+      description: server か tenant.<slug>
+      schema:
+        type: string
+    Serial:
+      name: serial
+      in: path
+      required: true
+      description: シリアル番号（16 進、小文字）
+      schema:
+        type: string
+  responses:
+    Problem:
+      description: 誤り（ProblemDetails）
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+  schemas:
+    Name:
+      type: string
+      pattern: "^[a-z0-9]([a-z0-9-]{0,30}[a-z0-9])?$"
+    Profile:
+      type: string
+      enum: [ap-client, probe-client, tenant-server]
+    CRLInfo:
+      type: object
+      required: [number, thisUpdate, nextUpdate]
+      properties:
+        number:
+          type: integer
+        thisUpdate:
+          type: string
+          format: date-time
+        nextUpdate:
+          type: string
+          format: date-time
+    CA:
+      type: object
+      required: [id, kind, status, subject, notAfter, createdAt, issued]
+      properties:
+        id:
+          type: string
+        kind:
+          type: string
+          enum: [server, tenant-client]
+        tenant:
+          type: string
+        status:
+          type: string
+          enum: [active, disabled]
+        subject:
+          type: string
+        notAfter:
+          type: string
+          format: date-time
+        createdAt:
+          type: string
+          format: date-time
+        disabledAt:
+          type: string
+          format: date-time
+        certificate:
+          type: string
+          description: PEM（/status では省く）
+        crl:
+          $ref: "#/components/schemas/CRLInfo"
+        crlError:
+          type: string
+          description: CRL の作り直しの最後の失敗（なければ省く）
+        issued:
+          type: integer
+          description: 発行した証明書の数
+    Cert:
+      type: object
+      required: [serial, caId, profile, tenant, cn, notBefore, notAfter, status, pubkeySha256, issuedAt, certificate]
+      properties:
+        serial:
+          type: string
+        caId:
+          type: string
+        profile:
+          $ref: "#/components/schemas/Profile"
+        tenant:
+          type: string
+        ap:
+          type: string
+        edge:
+          type: string
+        cn:
+          type: string
+        sanDns:
+          type: array
+          items:
+            type: string
+        sanUri:
+          type: string
+        notBefore:
+          type: string
+          format: date-time
+        notAfter:
+          type: string
+          format: date-time
+        status:
+          type: string
+          enum: [valid, revoked, expired]
+        revokedAt:
+          type: string
+          format: date-time
+        revokeReason:
+          type: string
+        pubkeySha256:
+          type: string
+        issuedAt:
+          type: string
+          format: date-time
+        certificate:
+          type: string
+          description: PEM
+        caCertificate:
+          type: string
+          description: 署名した CA の証明書（PEM。発行の応答だけ）
+    Status:
+      type: object
+      required: [service, version, kekId, urnPrefix, dnsDomain, cas, expiringSoon]
+      properties:
+        service:
+          type: string
+          const: radsec-ca
+        version:
+          type: string
+        kekId:
+          type: string
+        urnPrefix:
+          type: string
+        dnsDomain:
+          type: string
+        cas:
+          type: array
+          items:
+            $ref: "#/components/schemas/CA"
+        expiringSoon:
+          type: integer
+          description: 30 日以内に期限の切れる有効な証明書の数
+    Problem:
+      type: object
+      required: [title, status]
+      properties:
+        title:
+          type: string
+        status:
+          type: integer
+        detail:
+          type: string
+        cause:
+          type: string
+          enum: [VALIDATION_ERROR, CSR_INVALID, KEY_TYPE_UNSUPPORTED, NAME_RESERVED, CA_NOT_FOUND, CA_EXISTS, CA_DISABLED,
+            CERT_NOT_FOUND, IDEMPOTENCY_CONFLICT, SYSTEM_FAILURE]
+        invalidParams:
+          type: array
+          items:
+            type: object
+            required: [param]
+            properties:
+              param:
+                type: string
+              reason:
+                type: string
