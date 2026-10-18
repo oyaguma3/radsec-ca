@@ -1,6 +1,6 @@
-# radsec-ca 運用ガイド（下書き）
+# radsec-ca 運用ガイド
 
-- 状態: 下書き（2026-10-18）。段階 3（radsec-edge とつないだ単独モードの通し。simwifi）で手直しする（設計概要 §18 の 1）。
+- 状態: 2026-10-18。radsec-edge とつないだ単独モードの通し（radsec-edge の `scripts/e2e.sh`。simwifi）で、導入・CA の作成・署名・失効・配布の口の手順を確かめた（設計概要 §18 の 1）。
 - 対象: 本CA を導入・運用する人（CA の担当者）。
 
 ## 1. 構成
@@ -33,7 +33,7 @@ sudo chown 65532 secrets/kek && sudo chmod 600 secrets/kek
 
 - `CA_ORG`: CA の Subject の O と CN に入る組織の名前（作った CA の名前は後から変わらない）。
 - `CA_URN_PREFIX`・`CA_DNS_DOMAIN`: エッジの `EDGE_URN_PREFIX`・`EDGE_DNS_DOMAIN` と同じ値にそろえる。
-- `CA_BIND_ADDR`: トンネルの、このホストのアドレス。
+- `CA_BIND_ADDR`: トンネルの、このホストのアドレス。起動の前に、そのアドレスがホストのインターフェースにあること（WireGuard を先に上げる）。ないと、ポートを公開できずにコンテナが起動しない。
 - `CA_ACCESS_TEAM_DOMAIN`・`CA_ACCESS_AUD`・`CA_INITIAL_ADMIN_EMAIL`: 画面の認証。最初の管理者は、起動のたびに admin・有効に戻る。
 - 管理モード（provisioner から使う）では、`CA_ADMIN_CLIENTS`（provisioner のクライアント証明書の `識別名=フィンガープリント`）と `CA_TLS_HOSTS`（provisioner からつなぐ名前やアドレス）も書く。単独モードでは空のままにする（管理API を待ち受けない）。
 
@@ -66,6 +66,10 @@ docker compose exec -T radsec-ca /radsec-ca server-cert > radsec-ca-server.pem
 3. エッジの画面で出したサーバー証明書の CSR を、本CA の「署名」で `tenant-server`（テナントとエッジの名前）として署名し、エッジに取り込む。ヘルスチェック用の CSR も `probe-client` で同じようにする。
 4. AP の CSR を `ap-client`（テナントと AP の名前）で署名し、AP に入れる。エッジの画面で同じ名前の AP を登録する。AP にはサーバーCA の証明書（CA `server` の証明書）も入れる。
 5. 失効は証明書の詳細で行う。エッジは 5 分ごとに CRL を取りに来るので、エッジの側の操作は要らない（すぐ効かせたいときは、エッジの画面で「今すぐ取りに行く」）。
+
+### 3.1 確かめ
+
+radsec-edge の `scripts/e2e.sh` は、本CA を compose で導入し、管理API でテナントのクライアントCA の作成・署名・失効を行って、エッジが配布の口から CA の証明書と CRL を取ることまで確かめる（radsec-edge の運用ガイド 8 章）。画面の操作の代わりに管理API を使うが、署名と失効の中身は画面と同じ（どちらも ca の同じ処理を呼ぶ）。
 
 ## 4. 監視
 
