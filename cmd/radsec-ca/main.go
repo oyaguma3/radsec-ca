@@ -42,6 +42,8 @@ commands:
   serve        サーバーを起動する（コマンド省略時の既定）。初めてなら DB とサーバーCA を作る
   migrate      DB のスキーマを移行して終わる
   gen-kek      KEK（CA の鍵を暗号化する鍵）のファイルを作る（radsec-ca gen-kek -out <ファイル>）
+  rotate-kek   すべての CA の鍵を新しい KEK で暗号化し直す（radsec-ca rotate-kek -old <ファイル> -new <ファイル>。止めてから行う）
+  backup       動かしたまま DB の写しを作る（radsec-ca backup -out <ファイル>）
   server-cert  管理API のサーバー証明書（なければ作る）を標準出力に、フィンガープリントを標準エラーに出す
   healthcheck  動いている radsec-ca を確かめる（compose の healthcheck 用）
 
@@ -64,6 +66,10 @@ func main() {
 		err = migrate(ctx)
 	case "gen-kek":
 		err = genKEK(args[1:], os.Stderr)
+	case "rotate-kek":
+		err = rotateKEK(ctx, args[1:], os.Stderr)
+	case "backup":
+		err = backup(ctx, args[1:], os.Stderr)
 	case "server-cert":
 		err = serverCert(os.Stdout, os.Stderr)
 	case "healthcheck":
@@ -303,6 +309,107 @@ func genKEK(args []string, stderr io.Writer) error {
 		return err
 	}
 	fmt.Fprintf(stderr, "KEK を作りました: %s（識別子 %s）。DB とは別の場所にも保管してください。\n", *out, k.ID())
+	return nil
+}
+
+// dbPath は CLI の操作の DB のファイル（CA_DB_PATH。ほかの設定は要らない）。
+func dbPath() string { return cmp.Or(os.Getenv("CA_DB_PATH"), "/data/radsec-ca.db") }
+
+const rotateKEKUsage = `usage: radsec-ca rotate-kek -old <ファイル> -new <ファイル>
+
+すべての CA の鍵を、古い KEK で復号して新しい KEK で暗号化し直す（1 つのトランザクション。設計概要 §6.3）。
+本CA を止めてから行い、終わったら KEK のファイル（CA_KEK_FILE）を新しいものに置き換えてから起動する。
+DB は CA_DB_PATH（既定 /data/radsec-ca.db）。
+
+options:
+`
+
+func rotateKEK(ctx context.Context, args []string, stderr io.Writer) error {
+	fs := flag.NewFlagSet("rotate-kek", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	fs.Usage = func() {
+		fmt.Fprint(stderr, rotateKEKUsage)
+		fs.PrintDefaults()
+	}
+	oldPath := fs.String("old", "", "今の KEK のファイル")
+	newPath := fs.String("new", "", "新しい KEK のファイル（radsec-ca gen-kek で作る）")
+	if err := fs.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return nil
+		}
+		return err
+	}
+	if *oldPath == "" || *newPath == "" || fs.NArg() > 0 {
+		fs.Usage()
+		return errors.New("-old and -new are required")
+	}
+	oldKEK, err := kek.Load(*oldPath)
+	if err != nil {
+		return err
+	}
+	newKEK, err := kek.Load(*newPath)
+	if err != nil {
+		return err
+	}
+	if oldKEK.ID() == newKEK.ID() {
+		return errors.New("the new KEK is the same as the old one")
+	}
+	d, err := db.Open(ctx, dbPath())
+	if err != nil {
+		return err
+	}
+	defer d.Close()
+	sig := &signer.Local{DB: d, KEK: oldKEK}
+	n, err := sig.Rekey(ctx, newKEK)
+	if err != nil {
+		return err
+	}
+	if err := d.InsertAudit(ctx, db.AuditEntry{Operator: "cli", Source: db.SourceCLI, Action: "kek.rotate", Target: newKEK.ID(),
+		Detail: map[string]any{"old_kek_id": oldKEK.ID(), "new_kek_id": newKEK.ID(), "cas": n}}); err != nil {
+		return err
+	}
+	fmt.Fprintf(stderr, "%d 個の CA の鍵を新しい KEK（%s）で暗号化し直しました。CA_KEK_FILE を新しいファイルに置き換えてから起動してください。\n", n, newKEK.ID())
+	return nil
+}
+
+const backupUsage = `usage: radsec-ca backup -out <ファイル>
+
+動かしたまま DB の写しを作る（SQLite の VACUUM INTO。既存のファイルは上書きしない。設計概要 §6.3）。
+写しには暗号化した CA の鍵が入る。KEK と一緒に置かない。DB は CA_DB_PATH（既定 /data/radsec-ca.db）。
+
+options:
+`
+
+func backup(ctx context.Context, args []string, stderr io.Writer) error {
+	fs := flag.NewFlagSet("backup", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	fs.Usage = func() {
+		fmt.Fprint(stderr, backupUsage)
+		fs.PrintDefaults()
+	}
+	out := fs.String("out", "", "写しのファイル")
+	if err := fs.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return nil
+		}
+		return err
+	}
+	if *out == "" || fs.NArg() > 0 {
+		fs.Usage()
+		return errors.New("-out is required")
+	}
+	d, err := db.Open(ctx, dbPath())
+	if err != nil {
+		return err
+	}
+	defer d.Close()
+	if err := d.Backup(ctx, *out); err != nil {
+		return err
+	}
+	if err := d.InsertAudit(ctx, db.AuditEntry{Operator: "cli", Source: db.SourceCLI, Action: "backup", Target: filepath.Base(*out)}); err != nil {
+		return err
+	}
+	fmt.Fprintf(stderr, "DB の写しを作りました: %s（KEK とは別の場所に保管してください）\n", *out)
 	return nil
 }
 

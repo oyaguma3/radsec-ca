@@ -1,0 +1,78 @@
+# 本CA の配備（設計概要 §4）。本CA と cloudflared。運用ガイド（docs/operations.md）の手順で導入する。
+name: radsec-ca
+
+services:
+  radsec-ca:
+    build:
+      context: .
+      args:
+        VERSION: ${CA_VERSION:-dev}
+    image: radsec-ca:${CA_VERSION:-dev}
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    restart: unless-stopped
+    # 停止の合図から、処理中の要求を終えてサーバーを閉じ終えるまで最大 10 秒かかるので、Docker の既定の猶予より長くする。
+    stop_grace_period: 20s
+    environment:
+      TZ: ${TZ:-Asia/Tokyo}
+      CA_ORG: ${CA_ORG:?.env に CA_ORG を設定してください}
+      CA_URN_PREFIX: ${CA_URN_PREFIX:?.env に CA_URN_PREFIX を設定してください}
+      CA_DNS_DOMAIN: ${CA_DNS_DOMAIN:?.env に CA_DNS_DOMAIN を設定してください}
+      CA_DB_PATH: /data/radsec-ca.db
+      CA_KEK_FILE: /run/secrets/kek
+      CA_ADMIN_CLIENTS: ${CA_ADMIN_CLIENTS:-}
+      CA_TLS_HOSTS: ${CA_TLS_HOSTS:-}
+      CA_API_ADDR: ":9448"
+      CA_PUBLISH_ADDR: ":8449"
+      CA_GUI_ADDR: ":8448"
+      # 画面の利用者は Cloudflare Access の JWT で識別する（設計概要 §10.1）。compose では開発用の設定は使えない。
+      CA_ACCESS_TEAM_DOMAIN: ${CA_ACCESS_TEAM_DOMAIN:?.env に CA_ACCESS_TEAM_DOMAIN を設定してください}
+      CA_ACCESS_AUD: ${CA_ACCESS_AUD:?.env に CA_ACCESS_AUD を設定してください}
+      CA_INITIAL_ADMIN_EMAIL: ${CA_INITIAL_ADMIN_EMAIL:?.env に CA_INITIAL_ADMIN_EMAIL を設定してください}
+      CA_AP_CERT_DAYS: ${CA_AP_CERT_DAYS:-730}
+      CA_SERVER_CERT_DAYS: ${CA_SERVER_CERT_DAYS:-365}
+      CA_CRL_VALIDITY: ${CA_CRL_VALIDITY:-168h}
+      CA_CRL_REFRESH: ${CA_CRL_REFRESH:-24h}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+    secrets:
+      # KEK（CA の鍵を暗号化する鍵）。DB とは別のファイルで渡す（§6.1）。コンテナは UID 65532 で動くので、この UID で読めるようにする。
+      - kek
+    volumes:
+      # SQLite（暗号化した CA の鍵を含む）と管理API のサーバー証明書。
+      - ca-data:/data
+    # 管理API（9448）と配布の口（8449）は、トンネル（WireGuard など）のアドレスだけで公開する（§4）。
+    # 画面（8448）は公開しない（同じ compose の cloudflared から届く）。
+    ports:
+      - "${CA_BIND_ADDR:?.env に CA_BIND_ADDR（トンネルのアドレス）を設定してください}:9448:9448"
+      - "${CA_BIND_ADDR}:8449:8449"
+    healthcheck:
+      test: ["CMD", "/radsec-ca", "healthcheck"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+
+  cloudflared:
+    # Cloudflare Tunnel のコネクター。公開ホスト名への要求を画面（http://radsec-ca:8448。Tunnel の公開ホスト名の向け先に書く）に届ける。
+    image: cloudflare/cloudflared:2026.9.3
+    restart: unless-stopped
+    depends_on:
+      radsec-ca:
+        condition: service_healthy
+    command: ["tunnel", "--no-autoupdate", "run", "--token-file", "/etc/cloudflared/token"]
+    volumes:
+      # Tunnel のトークン（秘密の値）はファイルで渡す。コンテナは UID 65532 で動くので、この UID で読めるようにする。
+      - type: bind
+        source: ./secrets/tunnel-token
+        target: /etc/cloudflared/token
+        read_only: true
+        bind:
+          create_host_path: false
+
+secrets:
+  kek:
+    file: ./secrets/kek
+
+volumes:
+  ca-data:

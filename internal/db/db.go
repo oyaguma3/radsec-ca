@@ -204,3 +204,12 @@ func (d *DB) SchemaVersion(ctx context.Context) (int, error) {
 	err := d.sql.QueryRowContext(ctx, "SELECT coalesce(max(version), 0) FROM schema_migrations").Scan(&v)
 	return v, err
 }
+
+// Backup は、動かしたまま DB の写しを path に作る（SQLite の VACUUM INTO。§6.3）。path にファイルがあれば失敗する。
+// DB には平文の鍵はないが、写しは KEK と一緒に置かない。
+func (d *DB) Backup(ctx context.Context, path string) error {
+	if _, err := d.sql.ExecContext(ctx, "VACUUM INTO ?", path); err != nil {
+		return fmt.Errorf("backup to %s: %w", path, err)
+	}
+	return nil
+}

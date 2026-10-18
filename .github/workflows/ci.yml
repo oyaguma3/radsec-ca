@@ -59,3 +59,40 @@ jobs:
             grep -- '--- SKIP' interop.log
             exit 1
           fi
+
+  image:
+    name: イメージと compose の設定
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - name: イメージのビルド（画面の CSS の生成を含む）
+        run: docker build --build-arg VERSION="${GITHUB_SHA::7}" -t radsec-ca:ci .
+      - name: 生成した CSS の確認
+        run: |
+          docker create --name img radsec-ca:ci >/dev/null
+          docker cp img:/radsec-ca ./radsec-ca-bin
+          docker rm img >/dev/null
+          strings ./radsec-ca-bin | grep -q 'daisyUI' || { echo "daisyUI の CSS が埋め込まれていません"; exit 1; }
+          strings ./radsec-ca-bin | grep -q 'prefers-color-scheme:dark' || { echo "ダークテーマの CSS がありません"; exit 1; }
+      - name: compose の設定
+        run: |
+          cp .env.example .env
+          sed -i -e 's|^CA_ORG=.*|CA_ORG=CI Org|' -e 's|^CA_BIND_ADDR=.*|CA_BIND_ADDR=100.64.0.10|' \
+            -e 's|^CA_ACCESS_TEAM_DOMAIN=.*|CA_ACCESS_TEAM_DOMAIN=ci.cloudflareaccess.com|' \
+            -e 's|^CA_ACCESS_AUD=.*|CA_ACCESS_AUD=ci-aud|' -e 's|^CA_INITIAL_ADMIN_EMAIL=.*|CA_INITIAL_ADMIN_EMAIL=admin@example.com|' .env
+          docker compose config -q
+          docker compose config --format json > config.json
+          jq -e '.services | keys == ["cloudflared", "radsec-ca"]' config.json
+          # 管理API（9448）と配布の口（8449）だけを、トンネルのアドレスで公開する。画面（8448）は公開しない。
+          jq -e '[.services["radsec-ca"].ports[] | "\(.host_ip):\(.published)->\(.target)"] | sort == ["100.64.0.10:8449->8449", "100.64.0.10:9448->9448"]' config.json
+          jq -e '.services.cloudflared.ports // [] | length == 0' config.json
+          ! grep -q 'CA_DEV_USER_EMAIL' config.json
+          # KEK は secrets（ファイル）で渡す。読み取り専用・権限なし。
+          jq -e '.secrets.kek.file | endswith("/secrets/kek")' config.json
+          jq -e '.services["radsec-ca"].read_only == true and .services["radsec-ca"].cap_drop == ["ALL"]' config.json
+          jq -e '.services.cloudflared.command | index("--token-file") != null' config.json
+          grep -q 'create_host_path: false' compose.yaml
+          # 必須の設定が空なら、compose が断る。
+          sed -i -e 's|^CA_BIND_ADDR=.*|CA_BIND_ADDR=|' .env
+          ! docker compose config -q 2>/dev/null
