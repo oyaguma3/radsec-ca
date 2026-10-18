@@ -3,3 +3,15 @@ CLAUDE.md
 
 # ローカルのパスを含むので共有しない
 .claude/settings.json
+
+# リポジトリ直下で go build したときの成果物
+/radsec-ca
+
+# テストとカバレッジ
+*.test
+*.out
+coverage.*
+
+# エディター
+*.swp
+*~
