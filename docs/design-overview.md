@@ -323,6 +323,8 @@ SQLite（WAL）。スキーマの移行は OSS/BSS と同じ自前の仕組み�
 | 5 | 画面（Cloudflare Access、役割、各画面） | 結合の試験、simwifi |
 | 6 | 運用ガイド（導入、KEK とバックアップ、戻し方）、README、配備（Dockerfile、compose、CI） | 手元の compose。simwifi での導入の通しは、エッジと CA をつなぐ段階 3 にまとめる（§18 の 1） |
 
+手順 2〜6 は 2026-10-18 に終えた（単体・結合・相互運用の試験は CI で動かす。手元の compose で、KEK の secrets、管理API、配布の口、画面、バックアップを確かめた）。
+
 ## 16. エッジの設計概要への反映（2026-10-18 に反映した）
 
 - §12.2 の口の名前を本書 §9.3 に合わせる（`POST /certs`、`POST /certs/{serial}/revoke`、配布の口は `GET /crl/{caId}.pem`・`GET /ca/{caId}.pem`）。
