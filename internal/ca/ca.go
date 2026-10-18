@@ -41,6 +41,9 @@ type Service struct {
 	Options
 	// mu は CA の作成・停止・発行・失効・CRL の作成を 1 つずつにする（CRL の番号を飛ばさない・重ねないため）。
 	mu sync.Mutex
+	// crlErrors は CA ごとの CRL の作り直しの失敗（errMu で守る）。
+	errMu     sync.Mutex
+	crlErrors map[string]string
 }
 
 // New は Service を作る。

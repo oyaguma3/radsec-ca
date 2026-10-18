@@ -218,3 +218,30 @@ func (d *DB) CountCerts(ctx context.Context, before time.Time) (issued map[strin
 		millis(d.now()), millis(before)).Scan(&expiring)
 	return issued, expiring, err
 }
+
+// RevokeCert は証明書を失効させる。失効していれば何もせず false を返す（理由も変えない。§7.1）。なければ ErrNotFound。
+func (d *DB) RevokeCert(ctx context.Context, serial, reason string, at time.Time) (bool, error) {
+	res, err := d.sql.ExecContext(ctx, "UPDATE certs SET revoked_at = ?, revoke_reason = ? WHERE serial = ? AND revoked_at = 0",
+		millis(at), reason, serial)
+	if err != nil {
+		return false, fmt.Errorf("revoke cert %s: %w", serial, err)
+	}
+	if n, _ := res.RowsAffected(); n > 0 {
+		return true, nil
+	}
+	if _, err := d.Cert(ctx, serial); err != nil {
+		return false, err
+	}
+	return false, nil
+}
+
+// RevokeAllValid は、CA caID が発行した有効な（失効しておらず期限の切れていない）証明書をすべて失効させ、その数を返す（§7.4）。
+func (d *DB) RevokeAllValid(ctx context.Context, caID, reason string, at time.Time) (int, error) {
+	res, err := d.sql.ExecContext(ctx, "UPDATE certs SET revoked_at = ?, revoke_reason = ? WHERE ca_id = ? AND revoked_at = 0 AND not_after > ?",
+		millis(at), reason, caID, millis(at))
+	if err != nil {
+		return 0, fmt.Errorf("revoke all of %s: %w", caID, err)
+	}
+	n, _ := res.RowsAffected()
+	return int(n), nil
+}

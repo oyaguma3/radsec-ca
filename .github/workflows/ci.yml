@@ -36,3 +36,26 @@ jobs:
       - name: テスト
         run: go test -race -count=1 ./...
 
+
+  interop:
+    name: 相互運用の試験（openssl）
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - name: 相互運用の試験
+        env:
+          CA_TEST_OPENSSL: "1"
+        run: |
+          set -o pipefail
+          openssl version
+          go test -count=1 -v ./... | tee interop.log
+          # openssl の試験は CA_TEST_OPENSSL がないとスキップされ、テスト自体は成功してしまうので、別に確かめる。
+          if grep -q -- '--- SKIP' interop.log; then
+            echo "スキップされた試験があります"
+            grep -- '--- SKIP' interop.log
+            exit 1
+          fi

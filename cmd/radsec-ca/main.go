@@ -24,6 +24,7 @@ import (
 	"github.com/oyaguma3/radsec-ca/internal/config"
 	"github.com/oyaguma3/radsec-ca/internal/db"
 	"github.com/oyaguma3/radsec-ca/internal/kek"
+	"github.com/oyaguma3/radsec-ca/internal/publish"
 	"github.com/oyaguma3/radsec-ca/internal/server"
 	"github.com/oyaguma3/radsec-ca/internal/signer"
 )
@@ -156,6 +157,10 @@ func serve(ctx context.Context) error {
 		return err
 	}
 	defer a.db.Close()
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	go a.ca.Run(ctx)
+
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
 		if err := a.db.Ping(r.Context()); err != nil {
@@ -164,7 +169,31 @@ func serve(ctx context.Context) error {
 		}
 		fmt.Fprintln(w, "ok")
 	})
-	return server.Run(ctx, server.Options{Addr: a.cfg.GUIAddr, Handler: mux, Log: a.log})
+	return runAll(ctx, cancel,
+		func(ctx context.Context) error {
+			return server.Run(ctx, server.Options{Addr: a.cfg.GUIAddr, Handler: mux, Log: a.log.With("listener", "gui")})
+		},
+		func(ctx context.Context) error {
+			h := &publish.Handler{Log: a.log, DB: a.db}
+			return server.Run(ctx, server.Options{Addr: a.cfg.PublishAddr, Handler: h.Routes(), Log: a.log.With("listener", "publish")})
+		},
+	)
+}
+
+// runAll は fns を並べて動かし、どれかが終われば（失敗しても）ほかも止めて、最初の誤りを返す。
+func runAll(ctx context.Context, cancel context.CancelFunc, fns ...func(context.Context) error) error {
+	errc := make(chan error, len(fns))
+	for _, fn := range fns {
+		go func() { errc <- fn(ctx) }()
+	}
+	first := <-errc
+	cancel()
+	for range len(fns) - 1 {
+		if err := <-errc; first == nil {
+			first = err
+		}
+	}
+	return first
 }
 
 func migrate(ctx context.Context) error {
