@@ -1,6 +1,6 @@
 # radsec-ca 設計概要
 
-- 状態: 下書き（2026-10-18）。radsec-edge の設計概要（以下「エッジの設計概要」）の決定事項と §9（証明書と CA）をもとに、CA の詳しい作りを書いた。§17 の確認事項は 2026-10-18 にすべて推奨案で合意し（§3 の 6）、§16 のとおりエッジの設計概要に反映した。実装（エッジの段階 2）に入る前の確認事項（§18）も 2026-10-18 にすべて推奨案で合意した（§3 の 7）。2026-10-20 に、MVP セット（aka-mvpset）のための変更（持ち込みの CA と Box。§19）を加えた（§3 の 8）。
+- 状態: 下書き（2026-10-18）。radsec-edge の設計概要（以下「エッジの設計概要」）の決定事項と §9（証明書と CA）をもとに、CA の詳しい作りを書いた。§17 の確認事項は 2026-10-18 にすべて推奨案で合意し（§3 の 6）、§16 のとおりエッジの設計概要に反映した。実装（エッジの段階 2）に入る前の確認事項（§18）も 2026-10-18 にすべて推奨案で合意した（§3 の 7）。2026-10-20 に、MVP セット（aka-mvpset）のための変更（持ち込みの CA と Box。§19）を加え（§3 の 8）、2026-10-21 に業者の製品の調べとラボの結果で改めた（§3 の 9）。
 - 対象: RadSec のエッジのための独立CA（コマンド名 `radsec-ca`。以下「本CA」）。
 - 関連:
   - radsec-edge: `docs/design-overview.md`（全体の構成、名前の規則 §8、証明書と CA §9、CA の API の概要 §12.2、主な流れ §14、段階 0 の実機の検証 §18）
@@ -44,7 +44,8 @@ AP のクライアント証明書と、エッジのサーバー証明書を発�
 | 5 | テナントのサーバー証明書の SAN は、`primary` / `secondary` / `tertiary` の 3 つの名前を明示する（ワイルドカードは使わない）。エッジは AP の証明書を SAN の URI だけで照合する（エッジの決定事項 11。§18.2 の 1・6） | 2026-10-18 |
 | 6 | §17 の確認事項 1〜10 は、すべて推奨案とする。エッジの設計概要に §16 の直しを反映した（エッジの決定事項 12） | 2026-10-18 |
 | 7 | §18 の確認事項 1〜4（段階 2 の進め方）は、すべて推奨案とする。simwifi での導入の通しは段階 3 にまとめる（§15） | 2026-10-18 |
-| 8 | MVP セットのために、テナント専用の持ち込みの CA（自己署名に限る。CRL 必須）を登録し、その CRL を取り直して（またはアップロードを受けて）今の配布の口で配る。Box の証明書（`box-client`）を発行する（§19。エッジの決定事項 18） | 2026-10-20 |
+| 8 | MVP セットのために、テナント専用の持ち込みの CA（自己署名に限る。CRL 必須）を登録し、その CRL を取り直して（またはアップロードを受けて）今の配布の口で配る。Box の証明書（`box-client`）を発行する（§19。エッジの決定事項 18）（決定事項 9 で改めた） | 2026-10-20 |
+| 9 | 持ち込みの CA は、自己署名でない CA（Meraki の RadSec 用の CA）も受ける（エッジは `PartialChain` で起点にする）。同じ CA を別のテナントに登録することは断る。CRL の取得先に Meraki の Dashboard API と「なし」（了承を記録し、エッジはそのテナントを `CRLCheck off` にする）を足す。Box の証明書を、AP のグループで共有するグループの証明書（`group-client`、SAN `urn:<接頭辞>:grp:...`）に広げる（§19。エッジの決定事項 19、aka-mvpset の決定事項 31〜35） | 2026-10-21 |
 
 ## 4. 技術方針
 
@@ -353,12 +354,13 @@ SQLite（WAL）。スキーマの移行は OSS/BSS と同じ自前の仕組み�
 3. OpenAPI（`docs/openapi/ca-api.yaml`）は §15 の手順 4 で書き、実装の口と OpenAPI のパスがずれないことを試験で確かめる（段階 4 で provisioner が呼ぶときの契約になる）。
 4. コミットと push は、§15 の手順（2〜6）ごとに `main` に行う。CI（GitHub Actions）は手順 2 で足す。
 
-## 19. MVP セットのための変更（持ち込みの CA と Box）
+## 19. MVP セットのための変更（持ち込みの CA とグループの証明書）
 
 ### 19.1 背景
 
-- エッジと本CA を、VPS に分けて置いて顧客を収容できる MVP セット（[aka-mvpset](https://github.com/oyaguma3/aka-mvpset)）に組み入れる。2026-10-20 に、エッジの AP の見分け方にモード 3（CA でテナントを決め、NAS-Identifier をそのまま通す）を加え、業者の CA の証明書を使う AP と、RadSec に対応しない AP をまとめる Box を受けることにした（aka-mvpset の概要の決定事項 30、エッジの設計概要 §24、本書の決定事項 8）。
-- 本CA の変更は 2 つ: テナント専用の**持ち込みの CA** とその CRL を登録して配ること、**Box の証明書**を発行すること。
+- エッジと本CA を、VPS に分けて置いて顧客を収容できる MVP セット（[aka-mvpset](https://github.com/oyaguma3/aka-mvpset)）に組み入れる。2026-10-20 に、業者の CA の証明書を使う AP と、RadSec に対応しない AP をまとめる Box を受けることにした（本書の決定事項 8）。
+- 2026-10-21 に、業者の製品の調べとラボ（aka-mvpset の `verify/r10/`）をもとに改めた（本書の決定事項 9。aka-mvpset の決定事項 31〜35、エッジの設計概要 §24・決定事項 19）。主な点は、Meraki の新しい CA（PureCA）が自己署名でない中間 CA であること、Mist の組織の CA が CRL を出すか分からないこと、証明書を AP のグループで共有する製品（UniFi、Extreme など）が多いこと。
+- 本CA の変更は 2 つ: テナント専用の**持ち込みの CA** を登録して、その CRL を配ること（CRL のない CA も印を付けて登録できる）と、**グループの証明書**を発行すること。
 
 ### 19.2 持ち込みの CA
 
@@ -366,48 +368,56 @@ SQLite（WAL）。スキーマの移行は OSS/BSS と同じ自前の仕組み�
 |---|---|
 | ID | `brought.<slug>.<名前>`（名前はエッジの設計概要 §8.1 の規則。`.` は slug と名前に入らないので一意に読める） |
 | 種類 | `cas.kind` = `tenant-brought`。CA の証明書だけを持ち、鍵は持たない（本CA は署名しない） |
-| 登録のときの確かめ | PEM の CA の証明書が 1 つ。`BasicConstraints` が CA、`KeyUsage` に `keyCertSign` と `cRLSign`、有効期限の中。**自己署名の CA に限る**（§19.6 の V14 で確かめるまで、中間 CA は受けない） |
-| テナント専用であることの確認 | 登録する人が「このテナント専用の CA であることを確かめた」と明示し、監査ログに残す。業者がすべての顧客に共通で使う CA を登録すると、別の顧客の AP もそのテナントのポートにつながり、テナントの刻印が付いてしまうため（エッジの設計概要 §24.3）。確かめ方（発行の範囲）は受入試験の項目にする |
-| CRL | 必須。取得先の URL（本CA が定期的に取る）か、アップロード（§19.3）。CRL がなければ登録できない |
-| 状態 | `active` / `disabled`。`disabled` にしても、エッジからテナントを外し終わるまで CRL の取得と配布を続ける（§7.4 と同じ考え方） |
+| 登録のときの確かめ | PEM の CA の証明書が 1 つ。`BasicConstraints` が CA、`KeyUsage` に `keyCertSign`、有効期限の中。自己署名か否かを記録する（自己署名でない CA は、エッジで `PartialChain on` にして起点にする。エッジの設計概要 §24.5） |
+| テナント専用 | 登録する人が「このテナント専用の CA であることを確かめた」と明示し、監査ログに残す。**同じ CA（証明書の SHA-256 フィンガープリント）を別のテナントに登録することは断る**（1 テナント = 1 業者の組織）。全顧客で共通の CA は受けない |
+| CRL の取得先 | `url`（URL から取る）、`meraki`（Meraki の Dashboard API から取る）、`upload`（アップロードを受ける）、`none`（CRL がない）のどれか（§19.3） |
+| 状態 | `active` / `disabled`。`disabled` にしても、エッジからテナントの CA を外し終わるまで CRL の取得と配布を続ける（§7.4 と同じ考え方） |
 
-- 中間 CA を受けない理由: radsecproxy（OpenSSL）は、既定では自己署名でない CA を信頼の起点にしない可能性がある。その場合、業者のルートを束に入れる必要があり、ルートの下のすべての証明書（別の顧客のものを含む）がテナントのポートで検証を通ってしまう。
+- 自己署名でない CA を受けるのは、エッジの radsecproxy に `PartialChain` のパッチを当てたためである（エッジの設計概要 §24.5）。束に置くのはその CA だけで、上位の CA（業者の共通のルートなど）は置かない（置くと、他の顧客の証明書も検証を通るため）。
+- 業者の CA の入れ替え（Meraki の Keeper から PureCA への移行のような）に備え、同じテナントに複数の持ち込みの CA を登録できる。
 
 ### 19.3 持ち込みの CA の CRL
 
-- **URL から取る**: 本CA が `CA_BROUGHT_CRL_REFRESH`（案: 1 時間）ごとに取りに行く（`If-None-Match` / `If-Modified-Since` を付ける。タイムアウトは `CA_BROUGHT_CRL_TIMEOUT`、案: 30 秒）。HTTP と HTTPS の両方を受ける（CRL は署名で守られるため）。管理面のノードから業者の口へ外向きに出る通信を、ファイアウォールで許す必要がある。
-- **アップロード**: 管理API（`PUT /cas/{caId}/crl`）か画面から、PEM か DER の CRL を受ける。
-- どちらも、置く前に次を確かめる: 持ち込みの CA の証明書で署名が検証できる、nextUpdate が未来、`cRLNumber` があれば今の CRL の番号より小さくない。通らなければ置かずに今の CRL を残し、`/status` と画面に出す。
+| 取得先 | 取り方 |
+|---|---|
+| `url` | `CA_BROUGHT_CRL_REFRESH`（案: 1 時間）ごとに取りに行く（`If-None-Match` / `If-Modified-Since`、タイムアウトは `CA_BROUGHT_CRL_TIMEOUT`、案: 30 秒）。HTTP と HTTPS の両方を受ける（CRL は署名で守られるため） |
+| `meraki` | Meraki の Dashboard API の `GET /organizations/{organizationId}/wireless/devices/radsec/certificates/authorities/crls`（`certificateAuthorityIds` で絞れる）を、同じ間隔で呼ぶ。応答の `items` の中から、登録した CA が発行した CRL（発行者と署名で照合する）を選ぶ。差分の CRL（`.../crls/deltas`）は使わない（エッジの radsecproxy が差分の CRL を使わないため）。組織の ID と API キー（顧客に読み取り専用の管理者のキーを出してもらう）を登録し、API キーは KEK で暗号化して持つ |
+| `upload` | 管理API（`PUT /cas/{caId}/crl`）か画面から、PEM か DER の CRL を受ける |
+| `none` | CRL を配らない。エッジはそのテナントを `CRLCheck off` にし、共通のブロックを業者の証明書の形で絞る（エッジの設計概要 §24.3）。登録する人が「CRL がなく、業者の AP の失効が効かないこと」を了承したと明示し、監査ログに残す |
+
+- `url`・`meraki`・`upload` では、置く前に次を確かめる: 持ち込みの CA の証明書で署名が検証できる、nextUpdate が未来、`cRLNumber` があれば今の CRL の番号より小さくない。通らなければ置かずに今の CRL を残し、`/status` と画面に出す。
 - 本CA は持ち込みの CRL に署名し直さず、受け取ったものをそのまま `crls` に残して、今の配布の口（`GET /crl/{caId}.pem` / `.der`。§7.3）で配る。エッジは今と同じく CA の証明書で署名を確かめる。`ETag` は CRL の中身のハッシュから作る。
 - nextUpdate までの残りが閾値（案: 3 日。業者の CRL の nextUpdate がそれより短いときは、その半分）を切ったら、`/status` と画面で警告する。取得の失敗が続いたときも同じ。
+- `url` と `meraki` では、管理面のノードから業者の口へ外向きに出る通信を、ファイアウォールで許す必要がある。
+- Meraki の CRL の中身（どの CA の CRL が返るか、nextUpdate の長さ、AP を組織から外したときに失効として載るか）は、実機の組織で確かめるまで推定である（aka-mvpset の概要 §19）。
 
-### 19.4 Box の証明書
+### 19.4 グループの証明書
 
 | プロファイル | 材料 | 署名する CA | CN | SAN | EKU | 有効期限 |
 |---|---|---|---|---|---|---|
-| `box-client` | テナント、Box | `tenant.<テナント>` | `<テナント>-<Box>` | URI `urn:<接頭辞>:box:<テナント>:<Box>` | clientAuth | 730 日（`CA_BOX_CERT_DAYS`） |
+| `group-client` | テナント、グループ | `tenant.<テナント>` | `<テナント>-<グループ>` | URI `urn:<接頭辞>:grp:<テナント>:<グループ>` | clientAuth | 730 日（`CA_GROUP_CERT_DAYS`） |
 
-- Box の名前はエッジの設計概要 §8.1 の AP の名前と同じ規則。`probe` は予約。テナントの中で AP の名前と重ならないことは、OSS/BSS が保証する（CN が同じになるため）。
-- CSR の扱い（§5.3）、失効（§7.1）、更新は AP の証明書と同じ。Box を消すときは必ず `cessationOfOperation` で失効させる。モード 3 のテナントでは、Box のブロックに一致しない発行済みの証明書が、エッジの共通のブロックで受け付けられてしまうため（エッジの設計概要 §24.4）。
-- 本CA が発行するのは、登録した Box と probe の証明書だけにする。登録の台帳は OSS/BSS にあるので、provisioner を通した発行（`POST /certs`）は OSS/BSS の登録の流れからだけ呼ばれる。
+- 1 枚の証明書を、AP のグループ（UniFi の RADIUS のプロファイル、Extreme の Trust Point、Aruba の AP グループ、Mist の組織）や Box で共有して使う（aka-mvpset の概要 §9.3）。
+- グループの名前はエッジの設計概要 §8.1 の AP の名前と同じ規則。`probe` は予約。テナントの中で AP の名前と重ならないことは OSS/BSS が保証する（CN が同じになるため）。
+- 鍵は顧客が作り、CSR を出してもらう（本CA は鍵を作らない）。CSR の扱い（§5.3）、失効（§7.1）は AP の証明書と同じ。
+- 更新は同じグループの名前で発行し直す（SAN が同じなので、エッジの設定は変わらない）。顧客が入れ替えた後で古い証明書を `superseded` で失効させる。グループを消すときは `cessationOfOperation`、鍵が漏れたときは `keyCompromise` で失効させる。
+- 本CA が発行するのは、登録した AP・グループ・probe の証明書だけにする。登録の台帳は OSS/BSS にあるので、provisioner を通した発行（`POST /certs`）は OSS/BSS の登録の流れからだけ呼ばれる。
 
 ### 19.5 データ・API・設定の変更
 
 | 対象 | 変更 |
 |---|---|
-| `cas` | `kind` に `tenant-brought` を足す（`key_enc`・`key_nonce`・`kek_id` は空）。`crl_source`（`issued` / `url` / `upload`）、`crl_url`、取得の状態（`ETag`、最後に試みた時刻と結果）、テナント専用の確認をした操作者と時刻を足す |
-| `certs` | `box` を足す（`profile` が `box-client` のとき） |
+| `cas` | `kind` に `tenant-brought` を足す（`key_enc`・`key_nonce`・`kek_id` は空）。`self_signed`、`fingerprint_sha256`（全体で一意）、`crl_source`（`issued` / `url` / `meraki` / `upload` / `none`）、`crl_url`、Meraki の組織の ID と暗号化した API キー、取得の状態（`ETag`、最後に試みた時刻と結果）、テナント専用と CRL なしの了承をした操作者と時刻を足す |
+| `certs` | `grp`（グループの名前。`profile` が `group-client` のとき）を足す |
 | `crls` | 持ち込みの CA の CRL も同じ表に残す（`number` は `cRLNumber`。なければ空） |
-| 管理API | `POST /cas` に持ち込みの CA の登録（本文: `tenant`、`kind`=`brought`、`name`、`certPem`、`crlUrl` か `crlPem`、`tenantOnlyConfirmed`）。`PUT /cas/{caId}/crl`（アップロード）。`POST /cas/{caId}/crl:refresh`（すぐ取りに行く）。`POST /certs` に `box-client`（`tenant`・`box`）。`GET /status` に持ち込みの CA の CRL の状態 |
-| 画面 | 持ち込みの CA の登録・一覧・停止、CRL の状態と取り直し・アップロード、Box の証明書の発行と失効 |
-| 設定 | `CA_BROUGHT_CRL_REFRESH`（`1h`）、`CA_BROUGHT_CRL_TIMEOUT`（`30s`）、`CA_BOX_CERT_DAYS`（`730`） |
-| `cause` | `CA_NOT_SELF_SIGNED`、`CRL_INVALID`、`CRL_REQUIRED`、`TENANT_ONLY_NOT_CONFIRMED` を足す |
+| 管理API | `POST /cas` に持ち込みの CA の登録（本文: `tenant`、`kind`=`brought`、`name`、`certPem`、`crl`（`source` と、`url` か `merakiOrgId`・`merakiApiKey` か `pem`）、`tenantOnlyConfirmed`、`noCrlAccepted`）。`PUT /cas/{caId}/crl`（アップロード）。`POST /cas/{caId}/crl:refresh`（すぐ取りに行く）。`POST /certs` に `group-client`（`tenant`・`group`）。`GET /cas/{caId}` に自己署名か・CRL の有無を加える（エッジの `CRLCheck` と `PartialChain` を決めるのに使う）。`GET /status` に持ち込みの CA の CRL の状態 |
+| 画面 | 持ち込みの CA の登録・一覧・停止、CRL の状態と取り直し・アップロード、グループの証明書の発行と失効 |
+| 設定 | `CA_BROUGHT_CRL_REFRESH`（`1h`）、`CA_BROUGHT_CRL_TIMEOUT`（`30s`）、`CA_GROUP_CERT_DAYS`（`730`） |
+| `cause` | `CA_FINGERPRINT_IN_USE`、`CRL_INVALID`、`CRL_REQUIRED`、`TENANT_ONLY_NOT_CONFIRMED`、`NO_CRL_NOT_ACCEPTED` を足す |
 
-### 19.6 確かめること
+### 19.6 確かめたこと
 
-| # | 内容 | いつ |
-|---|---|---|
-| V14 | radsecproxy 1.11.2 で、自己署名でない中間 CA だけを `CACertificateFile` に入れたときに、その下の証明書を受け付けるか（OpenSSL の partial chain）。受け付けるなら、中間 CA の CRL だけで失効が効くか。結果によって、中間 CA の持ち込みを受けるかを決め直す | エッジの段階 4 の最初（エッジの設計概要 §24.6 の V11〜V13 と一緒に） |
+V14（radsecproxy が自己署名でない CA を信頼の起点にできるか）は、aka-mvpset の `verify/r10/` のラボ（2026-10-20）で確かめた。無改造の radsecproxy（1.11.2、1.11.4）ではできない。`PartialChain` のパッチを当てた版ではでき、他の組織の証明書を拒否できる。ただし `CRLCheck on` と組み合わせるには、CRL の確認をリーフだけにする変更も要る。このとき要る CRL は、起点にした CA の CRL 1 つだけになる（Meraki では RadSec 用の CA を起点にする）。結果のまとめは aka-mvpset の概要 §20.2、エッジの設計概要 §24.7。
 
 ### 19.7 進め方
 
