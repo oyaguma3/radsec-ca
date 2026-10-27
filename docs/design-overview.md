@@ -50,7 +50,7 @@ AP のクライアント証明書と、エッジのサーバー証明書を発�
 
 ## 4. 技術方針
 
-- 言語: Go 1.27.2。標準ライブラリを優先する（`crypto/x509`、`crypto/ecdsa`、`crypto/aes`・`crypto/cipher`、`net/http` のメソッドつき ServeMux、`html/template`、`embed`、`log/slog`、`encoding/json/v2`）。
+- 言語: Go 1.27.3。標準ライブラリを優先する（`crypto/x509`、`crypto/ecdsa`、`crypto/aes`・`crypto/cipher`、`net/http` のメソッドつき ServeMux、`html/template`、`embed`、`log/slog`、`encoding/json/v2`）。
 - 外部依存（Go）: `modernc.org/sqlite`（cgo の要らない SQLite のドライバー）だけ。JWT の検証（RS256）、JWKS の取得、スキーマの移行は、OSS/BSS のものをコピーして手直しする（共有モジュールにはしない）。
 - module パス: `github.com/oyaguma3/radsec-ca`。コマンド名は `radsec-ca`。設定は環境変数で受け取り、接頭辞は `CA_`。
 - 画面: OSS/BSS と同じ Go + htmx + daisyUI（JavaScript は書かない）。

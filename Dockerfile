@@ -1,5 +1,5 @@
 # radsec-ca のイメージ（設計概要 §4）。
-FROM golang:1.27.2 AS build
+FROM golang:1.27.3 AS build
 ARG VERSION=dev
 WORKDIR /src
 COPY go.mod go.sum ./
