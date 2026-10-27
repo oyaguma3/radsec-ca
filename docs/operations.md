@@ -95,7 +95,7 @@ docker compose exec -T radsec-ca /radsec-ca backup -h   # 使い方
 
 1. `docker compose stop radsec-ca` で止める。
 2. 写しをボリュームの `/data/radsec-ca.db` に置き、`radsec-ca.db-wal` と `radsec-ca.db-shm` があれば消す（例: `docker run --rm -v radsec-ca_ca-data:/data -v ./backups:/b busybox:1.37.0 sh -c 'cp /b/<写し> /data/radsec-ca.db && rm -f /data/radsec-ca.db-wal /data/radsec-ca.db-shm && chown 65532:65532 /data/radsec-ca.db'`）。
-3. 写しを作ったときの KEK が `secrets/kek` にあることを確かめて、`docker compose start radsec-ca` で起動する。KEK が違えば `CA_KEK_MISMATCH` で起動しない。
+3. 写しを作ったときの KEK が `secrets/kek` にあることを確かめて、`docker compose start radsec-ca` で起動する。KEK が違えば `CA_KEK_MISMATCH` で起動しない。`secrets/kek` を別のファイルに置き換えたときは、`start` ではなく `docker compose up -d --force-recreate radsec-ca` で作り直す（6 章の手順 4 と同じ理由）。
 4. 写しの後に発行・失効した証明書の記録はなくなる。失効させた証明書があれば、もう一度失効させる。
 
 ## 6. KEK の入れ替え
@@ -108,7 +108,14 @@ docker compose exec -T radsec-ca /radsec-ca backup -h   # 使い方
    docker compose run --rm -v ./secrets/kek-new:/run/secrets/kek-new:ro radsec-ca rotate-kek -old /run/secrets/kek -new /run/secrets/kek-new
    ```
 
-4. `secrets/kek` を新しいファイルに置き換え（古い KEK は、入れ替える前に取ったバックアップのために保管しておく）、`docker compose start radsec-ca` で起動する。
+4. `secrets/kek` を新しいファイルに置き換え（古い KEK は、入れ替える前に取ったバックアップのために保管しておく）、コンテナを作り直して起動する。
+
+   ```bash
+   mv secrets/kek secrets/kek-old && mv secrets/kek-new secrets/kek
+   docker compose up -d --force-recreate radsec-ca
+   ```
+
+   `docker compose start radsec-ca` では起動しない。KEK のファイルは単一ファイルの bind mount で、コンテナは作ったときのファイル（inode）を指し続けるため、`mv` で置き換えても古い KEK を読み、`CA_KEK_MISMATCH` で止まる（2026-10-28 に手元の compose で確かめた）。`docker compose up -d --force-recreate radsec-ca` で作り直すと、新しいファイルを読む。
 
 ## 7. 片付け
 
