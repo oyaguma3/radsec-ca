@@ -43,7 +43,8 @@ var funcs = template.FuncMap{
 	"profileLabel": profileLabel,
 	"statusLabel":  statusLabel,
 	// list は引数を並べたスライスを作る。
-	"list": func(v ...string) []string { return v },
+	"list":           func(v ...string) []string { return v },
+	"crlSourceLabel": crlSourceLabel,
 	// isAdmin は利用者が管理者か。
 	"isAdmin": func(role string) bool { return role == db.RoleAdmin },
 }

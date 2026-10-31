@@ -9,7 +9,7 @@
     <select name="profile" class="select select-sm">
       <option value="">すべて</option>
       {{- $p := .Profile}}
-      {{- range (list "ap-client" "probe-client" "tenant-server")}}<option value="{{.}}"{{if eq . $p}} selected{{end}}>{{profileLabel .}}</option>{{end}}
+      {{- range (list "ap-client" "group-client" "probe-client" "tenant-server")}}<option value="{{.}}"{{if eq . $p}} selected{{end}}>{{profileLabel .}}</option>{{end}}
     </select></fieldset>
   <fieldset class="fieldset"><legend class="fieldset-legend">状態</legend>
     <select name="status" class="select select-sm">

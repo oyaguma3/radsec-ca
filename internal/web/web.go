@@ -76,6 +76,8 @@ func (h *Handler) Routes() http.Handler {
 	mux.HandleFunc("GET /cas/{id}/ca.pem", h.caDownload)
 	mux.HandleFunc("GET /cas/{id}/crls/{number}", h.crlDownload)
 	mux.HandleFunc("POST /cas/{id}/disable", h.requireAdmin(h.caDisable))
+	mux.HandleFunc("POST /cas/{id}/crl/refresh", h.requireAdmin(h.crlRefresh))
+	mux.HandleFunc("POST /cas/{id}/crl/upload", h.requireAdmin(h.crlUpload))
 
 	mux.HandleFunc("GET /certs", h.certList)
 	mux.HandleFunc("GET /certs/{serial}", h.certDetail)

@@ -9,11 +9,20 @@
     <table class="table table-sm">
       <tbody>
         <tr><th class="w-48">Subject</th><td>{{.Subject}}</td></tr>
-        <tr><th>種類</th><td>{{if eq .Kind "server"}}サーバーCA（テナントのサーバー証明書を発行）{{else}}テナント {{.Tenant}} のクライアントCA（AP とヘルスチェック用の証明書を発行）{{end}}</td></tr>
+        <tr><th>種類</th><td>{{if eq .Kind "server"}}サーバーCA（テナントのサーバー証明書を発行）{{else if eq .Kind "tenant-brought"}}テナント {{.Tenant}} の持ち込みの CA（業者の CA。本CA は署名しません）{{else}}テナント {{.Tenant}} のクライアントCA（AP・グループ・ヘルスチェック用の証明書を発行）{{end}}</td></tr>
         <tr><th>シリアル番号</th><td><code class="text-xs">{{with .Cert}}{{.SerialNumber.Text 16}}{{end}}</code></td></tr>
         <tr><th>期限</th><td>{{datetime .NotAfter}}</td></tr>
+        {{- if eq .Kind "tenant-brought"}}
+        <tr><th>フィンガープリント</th><td><code class="text-xs break-all">{{.Fingerprint}}</code></td></tr>
+        <tr><th>自己署名</th><td>{{if .SelfSigned}}はい{{else}}いいえ（エッジは PartialChain で起点にします）{{end}}</td></tr>
+        <tr><th>CRL の取得先</th><td>{{crlSourceLabel .CRLSource}}{{with .CRLURL}}<div><code class="text-xs break-all">{{.}}</code></div>{{end}}{{with .MerakiOrgID}}<div class="text-sm">組織 {{.}}（API キー{{if $.Data.MerakiKeyEnc}}は設定済み{{else}}なし{{end}}）</div>{{end}}</td></tr>
+        <tr><th>CRL の取得の状態</th><td>{{if eq .CRLSource "none"}}-{{else}}最後の確かめ {{datetime .CRLCheckedAt}}、最後の成功 {{datetime .CRLOKAt}}{{if .CRLFailures}}、続けて {{.CRLFailures}} 回失敗{{end}}{{with .BroughtWarn}} <span class="badge badge-warning badge-sm">{{.}}</span>{{end}}{{end}}</td></tr>
+        <tr><th>テナント専用の確認</th><td>{{.TenantOnlyBy}}（{{datetime .TenantOnlyAt}}）</td></tr>
+        {{- if .NoCRLBy}}<tr><th>CRL なしの了承</th><td>{{.NoCRLBy}}（{{datetime .NoCRLAt}}）</td></tr>{{end}}
+        {{- else}}
         <tr><th>発行した証明書</th><td><a class="link" href="/certs?ca={{.ID}}">{{.Issued}} 件</a></td></tr>
-        <tr><th>配布の口</th><td><code>/ca/{{.ID}}.pem</code>、<code>/crl/{{.ID}}.pem</code>（8449）</td></tr>
+        {{- end}}
+        <tr><th>配布の口</th><td><code>/ca/{{.ID}}.pem</code>{{if ne .CRLSource "none"}}、<code>/crl/{{.ID}}.pem</code>{{end}}（8449）</td></tr>
         {{- if eq .Status "disabled"}}<tr><th>停止した時刻</th><td>{{datetime .DisabledAt}}</td></tr>{{end}}
       </tbody>
     </table>
@@ -25,19 +34,45 @@
 <div class="card bg-base-100 shadow mb-6">
   <div class="card-body">
     <h2 class="card-title">CRL の履歴（直近 30 個）</h2>
-    {{- with .CRLError}}<p class="text-error">作り直しに失敗しています: {{.}}</p>{{end}}
+    {{- with .CRLError}}<p class="text-error">更新に失敗しています: {{.}}</p>{{end}}
+    {{- if eq .CRLSource "none"}}<p class="text-sm text-base-content/60">この CA に CRL はありません。</p>{{end}}
     <table class="table table-sm">
-      <thead><tr><th>番号</th><th>thisUpdate</th><th>nextUpdate</th><th></th></tr></thead>
+      <thead><tr><th>番号</th>{{if eq .Kind "tenant-brought"}}<th>業者の番号</th>{{end}}<th>thisUpdate</th><th>nextUpdate</th><th></th></tr></thead>
       <tbody>
-        {{- $id := .ID}}
+        {{- $id := .ID}}{{$brought := eq .Kind "tenant-brought"}}
         {{- range .CRLs}}
-        <tr><td>{{.Number}}</td><td>{{datetime .ThisUpdate}}</td><td>{{datetime .NextUpdate}}</td><td><a class="link" href="/cas/{{$id}}/crls/{{.Number}}">取り出す</a></td></tr>
+        <tr><td>{{.Number}}</td>{{if $brought}}<td class="text-xs break-all">{{.ExtNumber}}</td>{{end}}<td>{{datetime .ThisUpdate}}</td><td>{{datetime .NextUpdate}}</td><td><a class="link" href="/cas/{{$id}}/crls/{{.Number}}">取り出す</a></td></tr>
         {{- end}}
       </tbody>
     </table>
   </div>
 </div>
 
+{{- if and (isAdmin $role) (eq .Kind "tenant-brought") (eq .Status "active")}}
+<div class="card bg-base-100 shadow mb-6">
+  <div class="card-body">
+    <h2 class="card-title">持ち込みの CA の操作</h2>
+    <p class="text-sm text-base-content/60">登録と取得先の変更は OSS/BSS の画面から行います。</p>
+    {{- if or (eq .CRLSource "url") (eq .CRLSource "meraki")}}
+    <form method="post" action="/cas/{{.ID}}/crl/refresh"><button class="btn btn-sm">CRL を今すぐ取りに行く</button></form>
+    {{- end}}
+    {{- if eq .CRLSource "upload"}}
+    <form method="post" action="/cas/{{.ID}}/crl/upload" enctype="multipart/form-data" autocomplete="off">
+      <fieldset class="fieldset">
+        <legend class="fieldset-legend">CRL（PEM を貼り付けるか、PEM・DER のファイルを選ぶ。1 MiB まで）</legend>
+        <textarea name="pem" rows="5" class="textarea w-full font-mono text-xs"></textarea>
+        <input type="file" name="file" class="file-input file-input-sm">
+      </fieldset>
+      <button class="btn btn-sm btn-primary">CRL を置く</button>
+    </form>
+    {{- end}}
+    <form id="brought-disable" method="post" action="/cas/{{.ID}}/disable"></form>
+    <p><button type="button" class="btn btn-sm btn-error btn-outline" command="show-modal" commandfor="dialog-brought-disable">この持ち込みの CA を停止する</button></p>
+    {{template "confirm" (dict "ID" "dialog-brought-disable" "Title" "持ち込みの CA の停止" "Form" "brought-disable" "Label" "停止する" "Class" "btn-error"
+      "Message" (printf "CA %s を停止します。CRL の取得を止め、API キーを消します（取り消せません）。テナントの配置のあるエッジから外し終えてから行ってください。外さずに止めると、CRL が更新されなくなり、nextUpdate を過ぎるとこの CA の AP は接続できなくなります。よろしいですか？" .ID))}}
+  </div>
+</div>
+{{- end}}
 {{- if and (isAdmin $role) (eq .Kind "tenant-client") (eq .Status "active")}}
 <form id="ca-disable" method="post" action="/cas/{{.ID}}/disable"></form>
 <button type="button" class="btn btn-error btn-outline" command="show-modal" commandfor="dialog-disable">この CA を停止する（テナントをやめる）</button>

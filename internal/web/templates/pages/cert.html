@@ -11,7 +11,7 @@
         <tr><th class="w-48">シリアル番号</th><td><code class="text-xs">{{.Serial}}</code></td></tr>
         <tr><th>プロファイル</th><td>{{profileLabel .Profile}}</td></tr>
         <tr><th>署名した CA</th><td><a class="link" href="/cas/{{.CAID}}">{{.CAID}}</a></td></tr>
-        <tr><th>名前の材料</th><td>テナント {{.Tenant}}{{with .AP}}、AP {{.}}{{end}}{{with .Edge}}、エッジ {{.}}{{end}}</td></tr>
+        <tr><th>名前の材料</th><td>テナント {{.Tenant}}{{with .AP}}、AP {{.}}{{end}}{{with .Edge}}、エッジ {{.}}{{end}}{{with .Group}}、グループ {{.}}{{end}}</td></tr>
         <tr><th>CN</th><td>{{.CN}}</td></tr>
         {{- with .SANDNS}}<tr><th>SAN（DNS）</th><td>{{range $i, $d := .}}{{if $i}}、{{end}}<code>{{$d}}</code>{{end}}</td></tr>{{end}}
         {{- with .SANURI}}<tr><th>SAN（URI）</th><td><code>{{.}}</code></td></tr>{{end}}

@@ -1,10 +1,12 @@
 package web
 
 import (
+	"bytes"
 	"context"
 	"html"
 	"io"
 	"log/slog"
+	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -205,5 +207,109 @@ func TestAuthentication(t *testing.T) {
 	}
 	if _, err := e.db.CA(t.Context(), "tenant.tenant-a"); err == nil {
 		t.Error("CA was created by a cross-site request")
+	}
+}
+
+func TestBroughtPages(t *testing.T) {
+	e := newTestEnv(t, auth.Dev("admin@example.com"), true)
+	ctx := t.Context()
+	v := catest.NewVendorCA(t, "vendor org")
+	c, err := e.svc.RegisterBrought(ctx, ca.Actor{Operator: "d@example.com", Source: db.SourceAPI}, ca.BroughtRequest{Tenant: "tenant-a", Name: "v", CertPEM: v.PEM, TenantOnlyConfirmed: true,
+		CRL: ca.CRLSource{Source: db.CRLSourceUpload, PEM: catest.CRLPEM(v.CRL(t, catest.CRLOptions{Number: 2}))}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s, body := e.get(t, "/")
+	must(t, "home", s, body, 200, "持ち込み")
+	s, body = e.get(t, "/cas/"+c.ID)
+	must(t, "detail", s, body, 200, "アップロードを受ける")
+	for _, want := range []string{"テナント専用の確認", "d@example.com", "CRL を置く", "業者の番号", "持ち込みの CA を停止する", c.Fingerprint} {
+		if !strings.Contains(body, want) {
+			t.Errorf("detail does not contain %q", want)
+		}
+	}
+	// 取得先が upload の CA には取り直しのボタンを出さない。
+	if strings.Contains(body, "今すぐ取りに行く") {
+		t.Error("refresh button for upload")
+	}
+	// アップロード（貼り付け）。
+	upload := func(field, name string, data []byte) (int, string) {
+		t.Helper()
+		var buf bytes.Buffer
+		mw := multipart.NewWriter(&buf)
+		if name != "" {
+			fw, _ := mw.CreateFormFile(field, name)
+			fw.Write(data)
+		} else {
+			mw.WriteField(field, string(data))
+		}
+		mw.Close()
+		req, _ := http.NewRequest(http.MethodPost, e.srv.URL+"/cas/"+c.ID+"/crl/upload", &buf)
+		req.Header.Set("Content-Type", mw.FormDataContentType())
+		req.Header.Set("Sec-Fetch-Site", "same-origin")
+		resp, err := client.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		b, _ := io.ReadAll(resp.Body)
+		return resp.StatusCode, string(b)
+	}
+	s, body = upload("pem", "", catest.CRLPEM(v.CRL(t, catest.CRLOptions{Number: 3})))
+	must(t, "upload pem", s, body, 200, "CRL を置きました")
+	s, body = upload("file", "v.crl", v.CRL(t, catest.CRLOptions{Number: 4}))
+	must(t, "upload der", s, body, 200, "CRL を置きました")
+	s, body = upload("pem", "", catest.CRLPEM(v.CRL(t, catest.CRLOptions{Number: 1})))
+	must(t, "upload older", s, body, 422, "CRL を置けません")
+	s, body, _ = e.post(t, "/cas/"+c.ID+"/crl/refresh", url.Values{})
+	must(t, "refresh upload", s, body, 422, "取りに行けません")
+	s, body, _ = e.post(t, "/cas/"+c.ID+"/disable", url.Values{})
+	must(t, "disable", s, body, 200, "持ち込みの CA を停止しました")
+	s, body = e.get(t, "/audit")
+	must(t, "audit", s, body, 200, "持ち込みの CA の登録")
+	// グループの証明書は一覧で見られる。
+	if _, err := e.svc.CreateTenantCA(ctx, ca.System, "tenant-a"); err != nil {
+		t.Fatal(err)
+	}
+	got, err := e.svc.Issue(ctx, ca.System, ca.IssueRequest{Profile: db.ProfileGroupClient, Material: ca.Material{Tenant: "tenant-a", Group: "unifi"}, CSR: catest.CSR(t, catest.Key(t))})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s, body = e.get(t, "/certs?profile=group-client")
+	must(t, "group list", s, body, 200, "グループ（group-client）")
+	s, body = e.get(t, "/certs/"+got.Cert.Serial)
+	must(t, "group detail", s, body, 200, "グループ unifi")
+	// 取りに行く CA には取り直しのボタンを出し、押すと取りに行く。
+	u := catest.NewVendorCA(t, "by url")
+	crl := u.CRL(t, catest.CRLOptions{Number: 1})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.Write(crl) }))
+	defer srv.Close()
+	c3, err := e.svc.RegisterBrought(ctx, ca.Actor{Operator: "d@example.com", Source: db.SourceAPI}, ca.BroughtRequest{Tenant: "tenant-c", Name: "u", CertPEM: u.PEM, TenantOnlyConfirmed: true,
+		CRL: ca.CRLSource{Source: db.CRLSourceURL, URL: srv.URL}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s, body = e.get(t, "/cas/"+c3.ID)
+	must(t, "url", s, body, 200, "CRL を今すぐ取りに行く")
+	s, body, _ = e.post(t, "/cas/"+c3.ID+"/crl/refresh", url.Values{})
+	must(t, "refresh", s, body, 200, "CRL を取りに行きました")
+	srv.Close()
+	for range 3 {
+		s, body, _ = e.post(t, "/cas/"+c3.ID+"/crl/refresh", url.Values{})
+		must(t, "refresh failed", s, body, 422, "CRL を置けません")
+	}
+	s, body = e.get(t, "/")
+	must(t, "warning", s, body, 200, "3 回続けて更新に失敗")
+	// CRL なしの CA。
+	n := catest.NewVendorCA(t, "no crl")
+	c2, err := e.svc.RegisterBrought(ctx, ca.Actor{Operator: "d@example.com", Source: db.SourceAPI}, ca.BroughtRequest{Tenant: "tenant-b", Name: "n", CertPEM: n.PEM, TenantOnlyConfirmed: true, NoCRLAccepted: true,
+		CRL: ca.CRLSource{Source: db.CRLSourceNone}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s, body = e.get(t, "/cas/"+c2.ID)
+	must(t, "none", s, body, 200, "CRL なしの了承")
+	if strings.Contains(body, "/crl/"+c2.ID+".pem") {
+		t.Error("the CRL path is shown for a CA without a CRL")
 	}
 }

@@ -4,6 +4,7 @@ import (
 	"crypto/x509"
 	"encoding/pem"
 	"errors"
+	"io"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -11,6 +12,7 @@ import (
 	"time"
 
 	"github.com/oyaguma3/radsec-ca/internal/ca"
+	"github.com/oyaguma3/radsec-ca/internal/certs"
 	"github.com/oyaguma3/radsec-ca/internal/config"
 	"github.com/oyaguma3/radsec-ca/internal/db"
 	"github.com/oyaguma3/radsec-ca/internal/names"
@@ -26,6 +28,10 @@ type caRow struct {
 	CRLError string
 	// CRLWarn は nextUpdate までが 3 日を切ったこと（作り直しが止まっている。§7.2）。
 	CRLWarn bool
+	// BroughtWarn は持ち込みの CA の CRL の警告の文（§19.3）。
+	BroughtWarn string
+	// Fingerprint は CA の証明書の SHA-256。
+	Fingerprint string
 }
 
 func (h *Handler) caRows(r *http.Request) ([]caRow, int, error) {
@@ -43,12 +49,24 @@ func (h *Handler) caRows(r *http.Request) ([]caRow, int, error) {
 		row := caRow{CA: c, Issued: issued[c.ID], CRLError: errs[c.ID]}
 		if cert, err := x509.ParseCertificate(c.CertDER); err == nil {
 			row.Subject = cert.Subject.String()
+			row.Fingerprint = certs.Fingerprint(cert)
 		}
-		if crl, err := h.DB.LatestCRL(r.Context(), c.ID); err == nil {
-			row.CRL = &crl
-			row.CRLWarn = crl.NextUpdate.Sub(h.Now()) < 72*time.Hour
-		} else if !errors.Is(err, db.ErrNotFound) {
-			return nil, 0, err
+		if c.Kind == db.KindTenantBrought {
+			row.CRLError = c.CRLLastError
+		}
+		if c.CRLSource != db.CRLSourceNone {
+			crl, err := h.DB.LatestCRL(r.Context(), c.ID)
+			switch {
+			case err == nil:
+				row.CRL = &crl
+				if c.Kind == db.KindTenantBrought {
+					row.BroughtWarn = ca.CRLWarning(c, &crl, h.Now())
+				} else {
+					row.CRLWarn = crl.NextUpdate.Sub(h.Now()) < 72*time.Hour
+				}
+			case !errors.Is(err, db.ErrNotFound):
+				return nil, 0, err
+			}
 		}
 		rows = append(rows, row)
 	}
@@ -202,7 +220,65 @@ func (h *Handler) caDisable(w http.ResponseWriter, r *http.Request) {
 		h.renderCA(w, r, http.StatusInternalServerError, "", "CA を停止できませんでした: "+err.Error())
 		return
 	}
+	if c.Kind == db.KindTenantBrought {
+		h.renderCA(w, r, http.StatusOK, "持ち込みの CA を停止しました。CRL の取得を止め、API キーを消しました（最新の CRL は配り続けます）。", "")
+		return
+	}
 	h.renderCA(w, r, http.StatusOK, "CA を停止し、有効な証明書をすべて失効させました（CRL は作り続けます）。", "")
+}
+
+// crlRefresh は持ち込みの CA の CRL をすぐ取りに行く（§19.5）。
+func (h *Handler) crlRefresh(w http.ResponseWriter, r *http.Request) {
+	c, ok := h.loadCA(w, r)
+	if !ok {
+		return
+	}
+	err := h.CA.RefreshBrought(r.Context(), c.ID)
+	if e, ok := ca.AsError(err); ok {
+		h.renderCA(w, r, http.StatusUnprocessableEntity, "", e.Msg)
+		return
+	}
+	if err != nil {
+		h.Log.Error("refresh CRL", "error", err)
+		h.renderCA(w, r, http.StatusInternalServerError, "", "CRL を取りに行けませんでした: "+err.Error())
+		return
+	}
+	h.CA.Audit(r.Context(), actorFrom(r.Context()), "ca.crl.refresh", c.ID, nil)
+	h.renderCA(w, r, http.StatusOK, "CRL を取りに行きました。", "")
+}
+
+// maxCRLUpload は画面からアップロードできる CRL の大きさの上限。
+const maxCRLUpload = 1 << 20
+
+// crlUpload は取得先が upload の CA に CRL を置く（§19.3）。貼り付けた PEM か、PEM・DER のファイルを受ける。
+func (h *Handler) crlUpload(w http.ResponseWriter, r *http.Request) {
+	c, ok := h.loadCA(w, r)
+	if !ok {
+		return
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, maxCRLUpload+4096)
+	if err := r.ParseMultipartForm(maxCRLUpload); err != nil {
+		h.renderCA(w, r, http.StatusBadRequest, "", "フォームを読めません（1 MiB まで）。")
+		return
+	}
+	data := []byte(strings.TrimSpace(r.PostFormValue("pem")))
+	if file, _, err := r.FormFile("file"); err == nil {
+		defer file.Close()
+		if b, err := io.ReadAll(file); err == nil && len(b) > 0 {
+			data = b
+		}
+	}
+	err := h.CA.UploadCRL(r.Context(), actorFrom(r.Context()), c.ID, data)
+	if e, ok := ca.AsError(err); ok {
+		h.renderCA(w, r, http.StatusUnprocessableEntity, "", e.Msg)
+		return
+	}
+	if err != nil {
+		h.Log.Error("upload CRL", "error", err)
+		h.renderCA(w, r, http.StatusInternalServerError, "", "CRL を置けませんでした: "+err.Error())
+		return
+	}
+	h.renderCA(w, r, http.StatusOK, "CRL を置きました。", "")
 }
 
 // certsData は証明書の一覧の画面に出す値。
