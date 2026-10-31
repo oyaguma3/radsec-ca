@@ -98,6 +98,16 @@ func (h *Handler) crl(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
+	// 取得先が none の持ち込みの CA は CRL を配らない（残っている古い CRL も配らない。§19.3）。
+	ca, err := h.DB.CA(r.Context(), id)
+	if errors.Is(err, db.ErrNotFound) || (err == nil && ca.CRLSource == db.CRLSourceNone) {
+		http.NotFound(w, r)
+		return
+	}
+	if err != nil {
+		h.fail(w, r, err)
+		return
+	}
 	c, err := h.DB.LatestCRL(r.Context(), id)
 	if errors.Is(err, db.ErrNotFound) {
 		http.NotFound(w, r)

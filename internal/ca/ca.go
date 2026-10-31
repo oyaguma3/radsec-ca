@@ -13,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/oyaguma3/radsec-ca/internal/crlfetch"
 	"github.com/oyaguma3/radsec-ca/internal/db"
 	"github.com/oyaguma3/radsec-ca/internal/names"
 	"github.com/oyaguma3/radsec-ca/internal/signer"
@@ -28,10 +29,14 @@ type Options struct {
 	Signer signer.Signer
 	// Org は CA の Subject の O と CN に入れる組織の名前。URNPrefix と DNSDomain は名前の規則の値。
 	Org, URNPrefix, DNSDomain string
-	// APCertDays と ServerCertDays は有効期限（日）。
-	APCertDays, ServerCertDays int
+	// APCertDays・GroupCertDays・ServerCertDays は有効期限（日）。
+	APCertDays, GroupCertDays, ServerCertDays int
 	// CRLValidity は CRL の nextUpdate までの長さ、CRLRefresh は作り直しの間隔。
 	CRLValidity, CRLRefresh time.Duration
+	// Fetcher は持ち込みの CA の CRL を取ってくる。BroughtCRLRefresh は取りに行く間隔。Secrets は Meraki の API キーを暗号化する。
+	Fetcher           *crlfetch.Fetcher
+	BroughtCRLRefresh time.Duration
+	Secrets           SecretBox
 	// Now は現在時刻（テストで差し替える）。
 	Now func() time.Time
 }
@@ -71,7 +76,7 @@ func (s *Service) audit(ctx context.Context, a Actor, action, target, result str
 	err := s.DB.InsertAudit(context.WithoutCancel(ctx), db.AuditEntry{Operator: a.Operator, MgmtClient: a.MgmtClient, Source: a.Source,
 		Action: action, Target: target, Result: result, Detail: detail, TraceID: a.TraceID})
 	if err != nil {
-		s.Log.Error("cannot write audit log", "action", action, "target", target, "error", err)
+		s.Log.Error("cannot write audit log", "event_id", "CA_AUDIT_WRITE_ERR", "action", action, "target", target, "error", err)
 	}
 	s.Log.Info("audit", "event_id", "CA_AUDIT", "operator", a.Operator, "mgmt_client", a.MgmtClient, "source", a.Source,
 		"action", action, "target", target, "result", result, "trace_id", a.TraceID)
@@ -182,16 +187,16 @@ func (s *Service) Issue(ctx context.Context, a Actor, req IssueRequest) (Issued,
 	if cert == nil {
 		return Issued{}, errors.New("cannot allocate a unique serial number")
 	}
-	rec := db.Cert{Serial: serialHex(cert), CAID: p.caID, Profile: req.Profile, Tenant: p.tenant, AP: req.AP, Edge: req.Edge,
+	rec := db.Cert{Serial: serialHex(cert), CAID: p.caID, Profile: req.Profile, Tenant: p.tenant, AP: req.AP, Edge: req.Edge, Group: req.Group,
 		CN: p.cn, SANDNS: p.dns, SANURI: p.uri, NotBefore: cert.NotBefore, NotAfter: cert.NotAfter, CertDER: cert.Raw,
 		PubKeySHA256: PubKeySHA256(pub), IssuedBy: a.Operator, TraceID: a.TraceID, CreatedAt: now}
 	if err := s.DB.InsertCert(ctx, rec); err != nil {
 		return Issued{}, err
 	}
 	s.audit(ctx, a, "cert.issue", rec.Serial, "ok", map[string]any{"profile": req.Profile, "tenant": req.Tenant, "ap": req.AP,
-		"edge": req.Edge, "serial": rec.Serial, "pubkey_sha256": rec.PubKeySHA256, "not_after": rec.NotAfter.UTC().Format(time.RFC3339)})
+		"edge": req.Edge, "group": req.Group, "serial": rec.Serial, "pubkey_sha256": rec.PubKeySHA256, "not_after": rec.NotAfter.UTC().Format(time.RFC3339)})
 	s.Log.Info("certificate issued", "event_id", "CA_CERT_ISSUED", "serial", rec.Serial, "profile", req.Profile, "tenant", req.Tenant,
-		"ap", req.AP, "edge", req.Edge, "trace_id", a.TraceID)
+		"ap", req.AP, "edge", req.Edge, "group", req.Group, "trace_id", a.TraceID)
 	return Issued{Cert: rec, CertPEM: CertPEM(cert.Raw), CAPEM: CertPEM(c.CertDER)}, nil
 }
 

@@ -46,11 +46,12 @@ func (p *problem) write(w http.ResponseWriter) {
 // statusOf は ca の誤りの符号から HTTP のステータスを決める。
 func statusOf(cause string) int {
 	switch cause {
-	case ca.CauseCANotFound, ca.CauseCertNotFound:
+	case ca.CauseCANotFound, ca.CauseCertNotFound, ca.CauseCRLNotFound:
 		return http.StatusNotFound
-	case ca.CauseCAExists, ca.CauseCADisabled:
+	case ca.CauseCAExists, ca.CauseCADisabled, ca.CauseFingerprintInUse:
 		return http.StatusConflict
-	case ca.CauseNameReserved, ca.CauseKeyTypeUnsupported, ca.CauseCSRInvalid:
+	case ca.CauseNameReserved, ca.CauseKeyTypeUnsupported, ca.CauseCSRInvalid, ca.CauseCRLInvalid, ca.CauseCRLRequired,
+		ca.CauseTenantOnlyNotConfirmed, ca.CauseNoCRLNotAccepted:
 		return http.StatusUnprocessableEntity
 	}
 	return http.StatusBadRequest

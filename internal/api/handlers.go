@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/oyaguma3/radsec-ca/internal/ca"
+	"github.com/oyaguma3/radsec-ca/internal/certs"
 	"github.com/oyaguma3/radsec-ca/internal/db"
 	"github.com/oyaguma3/radsec-ca/internal/names"
 	"github.com/oyaguma3/radsec-ca/internal/signer"
@@ -28,13 +29,47 @@ type caJSON struct {
 	CRL         *crlInfo  `json:"crl,omitempty"`
 	CRLError    string    `json:"crlError,omitempty"`
 	Issued      int       `json:"issued"`
+	// Fingerprint は CA の証明書の SHA-256。SelfSigned は自己署名か、HasCRL は CRL があるか（エッジの CRLCheck と PartialChain を決める）。
+	Fingerprint string `json:"fingerprint"`
+	SelfSigned  bool   `json:"selfSigned"`
+	HasCRL      bool   `json:"hasCrl"`
+	// 持ち込みの CA の CRL の取得先と状態（§19.3）。API キーは返さず、設定済みかだけを返す。
+	CRLSource    string     `json:"crlSource"`
+	CRLURL       string     `json:"crlUrl,omitempty"`
+	MerakiOrgID  string     `json:"merakiOrgId,omitempty"`
+	MerakiKeySet bool       `json:"merakiKeySet,omitempty"`
+	CRLState     *crlStatus `json:"crlState,omitempty"`
+	// CRLWarning は持ち込みの CA の CRL の警告の文（なければ省く）。
+	CRLWarning string `json:"crlWarning,omitempty"`
+	// テナント専用の確認と CRL なしの了承（§19.2、§19.3）。
+	TenantOnlyConfirmedBy string    `json:"tenantOnlyConfirmedBy,omitempty"`
+	TenantOnlyConfirmedAt time.Time `json:"tenantOnlyConfirmedAt,omitzero"`
+	NoCRLAcceptedBy       string    `json:"noCrlAcceptedBy,omitempty"`
+	NoCRLAcceptedAt       time.Time `json:"noCrlAcceptedAt,omitzero"`
+}
+
+// crlStatus は持ち込みの CA の CRL の取得の状態。
+type crlStatus struct {
+	CheckedAt time.Time `json:"checkedAt,omitzero"`
+	OKAt      time.Time `json:"okAt,omitzero"`
+	Failures  int       `json:"failures"`
+	LastError string    `json:"lastError,omitempty"`
 }
 
 // crlInfo は最新の CRL の要約。
 type crlInfo struct {
 	Number     int64     `json:"number"`
+	ExtNumber  string    `json:"extNumber,omitempty"`
 	ThisUpdate time.Time `json:"thisUpdate"`
 	NextUpdate time.Time `json:"nextUpdate"`
+}
+
+// utcOrZero は時刻を UTC にする（ゼロ値はそのまま）。
+func utcOrZero(t time.Time) time.Time {
+	if t.IsZero() {
+		return t
+	}
+	return t.UTC()
 }
 
 func (h *Handler) caJSON(r *http.Request, c db.CA, issued map[string]int) (caJSON, error) {
@@ -43,15 +78,28 @@ func (h *Handler) caJSON(r *http.Request, c db.CA, issued map[string]int) (caJSO
 		return caJSON{}, err
 	}
 	out := caJSON{ID: c.ID, Kind: c.Kind, Tenant: c.Tenant, Status: c.Status, Subject: cert.Subject.String(), NotAfter: c.NotAfter.UTC(),
-		CreatedAt: c.CreatedAt.UTC(), Certificate: string(ca.CertPEM(c.CertDER)), CRLError: h.CA.CRLErrors()[c.ID], Issued: issued[c.ID]}
+		CreatedAt: c.CreatedAt.UTC(), Certificate: string(ca.CertPEM(c.CertDER)), CRLError: h.CA.CRLErrors()[c.ID], Issued: issued[c.ID],
+		Fingerprint: certs.Fingerprint(cert), SelfSigned: c.SelfSigned, HasCRL: c.CRLSource != db.CRLSourceNone, CRLSource: c.CRLSource,
+		CRLURL: c.CRLURL, MerakiOrgID: c.MerakiOrgID, MerakiKeySet: len(c.MerakiKeyEnc) > 0, TenantOnlyConfirmedBy: c.TenantOnlyBy,
+		TenantOnlyConfirmedAt: utcOrZero(c.TenantOnlyAt), NoCRLAcceptedBy: c.NoCRLBy, NoCRLAcceptedAt: utcOrZero(c.NoCRLAt)}
 	if !c.DisabledAt.IsZero() {
 		out.DisabledAt = c.DisabledAt.UTC()
+	}
+	if c.Kind == db.KindTenantBrought {
+		out.CRLState = &crlStatus{CheckedAt: utcOrZero(c.CRLCheckedAt), OKAt: utcOrZero(c.CRLOKAt), Failures: c.CRLFailures, LastError: c.CRLLastError}
+	}
+	// CRL をやめた CA には、残っている古い CRL を見せない（配布の口と同じ）。
+	if c.CRLSource == db.CRLSourceNone {
+		return out, nil
 	}
 	latest, err := h.DB.LatestCRL(r.Context(), c.ID)
 	switch {
 	case err == nil:
-		out.CRL = &crlInfo{Number: latest.Number, ThisUpdate: latest.ThisUpdate.UTC(), NextUpdate: latest.NextUpdate.UTC()}
-	case !errors.Is(err, db.ErrNotFound):
+		out.CRL = &crlInfo{Number: latest.Number, ExtNumber: latest.ExtNumber, ThisUpdate: latest.ThisUpdate.UTC(), NextUpdate: latest.NextUpdate.UTC()}
+		out.CRLWarning = ca.CRLWarning(c, &latest, h.now())
+	case errors.Is(err, db.ErrNotFound):
+		out.CRLWarning = ca.CRLWarning(c, nil, h.now())
+	default:
 		return caJSON{}, err
 	}
 	return out, nil
@@ -91,7 +139,17 @@ func (h *Handler) status(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) listCAs(w http.ResponseWriter, r *http.Request) {
-	cas, err := h.DB.CAs(r.Context())
+	var cas []db.CA
+	var err error
+	if tenant := r.URL.Query().Get("tenant"); tenant != "" {
+		if !names.ValidSlug(tenant) {
+			badRequest("tenant", "must follow the naming rule").write(w)
+			return
+		}
+		cas, err = h.DB.TenantCAs(r.Context(), tenant)
+	} else {
+		cas, err = h.DB.CAs(r.Context())
+	}
 	if err != nil {
 		h.fail(w, r, err)
 		return
@@ -154,15 +212,50 @@ func (h *Handler) getCA(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// crlSourceJSON は CRL の取得先の要求（§19.5）。
+type crlSourceJSON struct {
+	Source       string `json:"source"`
+	URL          string `json:"url,omitempty"`
+	MerakiOrgID  string `json:"merakiOrgId,omitempty"`
+	MerakiAPIKey string `json:"merakiApiKey,omitempty"`
+	PEM          string `json:"pem,omitempty"`
+}
+
+func (j crlSourceJSON) source() ca.CRLSource {
+	return ca.CRLSource{Source: j.Source, URL: j.URL, MerakiOrgID: j.MerakiOrgID, MerakiAPIKey: j.MerakiAPIKey, PEM: []byte(j.PEM)}
+}
+
 func (h *Handler) createCA(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Tenant string `json:"tenant"`
+		// Kind が brought なら持ち込みの CA の登録（§19.2）。空ならテナントのクライアントCA の作成。
+		Kind                string        `json:"kind"`
+		Name                string        `json:"name"`
+		CertPEM             string        `json:"certPem"`
+		CRL                 crlSourceJSON `json:"crl"`
+		TenantOnlyConfirmed bool          `json:"tenantOnlyConfirmed"`
+		NoCRLAccepted       bool          `json:"noCrlAccepted"`
 	}
 	if p := readJSON(r, &req); p != nil {
 		p.write(w)
 		return
 	}
-	c, err := h.CA.CreateTenantCA(r.Context(), actor(r), req.Tenant)
+	var c db.CA
+	var err error
+	switch req.Kind {
+	case "brought":
+		c, err = h.CA.RegisterBrought(r.Context(), actor(r), ca.BroughtRequest{Tenant: req.Tenant, Name: req.Name, CertPEM: []byte(req.CertPEM),
+			CRL: req.CRL.source(), TenantOnlyConfirmed: req.TenantOnlyConfirmed, NoCRLAccepted: req.NoCRLAccepted})
+	case "":
+		if req.Name != "" || req.CertPEM != "" || req.CRL != (crlSourceJSON{}) || req.TenantOnlyConfirmed || req.NoCRLAccepted {
+			badRequest("kind", "the items of a brought CA need kind brought").write(w)
+			return
+		}
+		c, err = h.CA.CreateTenantCA(r.Context(), actor(r), req.Tenant)
+	default:
+		badRequest("kind", "must be brought or omitted").write(w)
+		return
+	}
 	if err != nil {
 		h.fail(w, r, err)
 		return
@@ -193,7 +286,16 @@ func (h *Handler) getCRL(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	noCRL := &ca.Error{Cause: ca.CauseCRLNotFound, Param: "caId", Msg: "CA " + c.ID + " に CRL はありません"}
+	if c.CRLSource == db.CRLSourceNone {
+		h.fail(w, r, noCRL)
+		return
+	}
 	latest, err := h.DB.LatestCRL(r.Context(), c.ID)
+	if errors.Is(err, db.ErrNotFound) {
+		h.fail(w, r, noCRL)
+		return
+	}
 	if err != nil {
 		h.fail(w, r, err)
 		return
@@ -201,10 +303,76 @@ func (h *Handler) getCRL(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, struct {
 		CAID       string    `json:"caId"`
 		Number     int64     `json:"number"`
+		ExtNumber  string    `json:"extNumber,omitempty"`
 		ThisUpdate time.Time `json:"thisUpdate"`
 		NextUpdate time.Time `json:"nextUpdate"`
 		CRL        string    `json:"crl"`
-	}{c.ID, latest.Number, latest.ThisUpdate.UTC(), latest.NextUpdate.UTC(), string(pem.EncodeToMemory(&pem.Block{Type: "X509 CRL", Bytes: latest.DER}))})
+	}{c.ID, latest.Number, latest.ExtNumber, latest.ThisUpdate.UTC(), latest.NextUpdate.UTC(), string(pem.EncodeToMemory(&pem.Block{Type: "X509 CRL", Bytes: latest.DER}))})
+}
+
+// putCRL は取得先が upload の CA に CRL を置く（§19.3）。
+func (h *Handler) putCRL(w http.ResponseWriter, r *http.Request) {
+	c, ok := h.caByPath(w, r)
+	if !ok {
+		return
+	}
+	var req struct {
+		PEM string `json:"pem"`
+	}
+	if p := readJSON(r, &req); p != nil {
+		p.write(w)
+		return
+	}
+	if err := h.CA.UploadCRL(r.Context(), actor(r), c.ID, []byte(req.PEM)); err != nil {
+		h.fail(w, r, err)
+		return
+	}
+	h.writeCurrentCA(w, r, c.ID)
+}
+
+// refreshCRL は持ち込みの CA の CRL をすぐ取りに行く（§19.5）。
+func (h *Handler) refreshCRL(w http.ResponseWriter, r *http.Request) {
+	c, ok := h.caByPath(w, r)
+	if !ok {
+		return
+	}
+	if err := h.CA.RefreshBrought(r.Context(), c.ID); err != nil {
+		h.fail(w, r, err)
+		return
+	}
+	h.CA.Audit(r.Context(), actor(r), "ca.crl.refresh", c.ID, nil)
+	h.writeCurrentCA(w, r, c.ID)
+}
+
+// putCRLSource は持ち込みの CA の CRL の取得先を変える（§19.5）。
+func (h *Handler) putCRLSource(w http.ResponseWriter, r *http.Request) {
+	c, ok := h.caByPath(w, r)
+	if !ok {
+		return
+	}
+	var req struct {
+		CRL           crlSourceJSON `json:"crl"`
+		NoCRLAccepted bool          `json:"noCrlAccepted"`
+	}
+	if p := readJSON(r, &req); p != nil {
+		p.write(w)
+		return
+	}
+	if _, err := h.CA.ChangeCRLSource(r.Context(), actor(r), c.ID, req.CRL.source(), req.NoCRLAccepted); err != nil {
+		h.fail(w, r, err)
+		return
+	}
+	h.writeCurrentCA(w, r, c.ID)
+}
+
+// writeCurrentCA は CA を読み直して応答する。
+func (h *Handler) writeCurrentCA(w http.ResponseWriter, r *http.Request, id string) {
+	c, err := h.DB.CA(r.Context(), id)
+	if err != nil {
+		h.fail(w, r, err)
+		return
+	}
+	h.writeCA(w, r, http.StatusOK, c)
 }
 
 // certJSON は証明書の応答。
@@ -215,6 +383,7 @@ type certJSON struct {
 	Tenant        string    `json:"tenant"`
 	AP            string    `json:"ap,omitempty"`
 	Edge          string    `json:"edge,omitempty"`
+	Group         string    `json:"group,omitempty"`
 	CN            string    `json:"cn"`
 	SANDNS        []string  `json:"sanDns,omitempty"`
 	SANURI        string    `json:"sanUri,omitempty"`
@@ -230,7 +399,7 @@ type certJSON struct {
 }
 
 func (h *Handler) certJSON(c db.Cert) certJSON {
-	out := certJSON{Serial: c.Serial, CAID: c.CAID, Profile: c.Profile, Tenant: c.Tenant, AP: c.AP, Edge: c.Edge, CN: c.CN, SANDNS: c.SANDNS,
+	out := certJSON{Serial: c.Serial, CAID: c.CAID, Profile: c.Profile, Tenant: c.Tenant, AP: c.AP, Edge: c.Edge, Group: c.Group, CN: c.CN, SANDNS: c.SANDNS,
 		SANURI: c.SANURI, NotBefore: c.NotBefore.UTC(), NotAfter: c.NotAfter.UTC(), Status: c.Status(h.now()), RevokeReason: c.RevokeReason,
 		PubKeySHA256: c.PubKeySHA256, IssuedAt: c.CreatedAt.UTC(), Certificate: string(ca.CertPEM(c.CertDER))}
 	if !c.RevokedAt.IsZero() {
@@ -245,6 +414,7 @@ func (h *Handler) issue(w http.ResponseWriter, r *http.Request) {
 		Tenant  string `json:"tenant"`
 		AP      string `json:"ap"`
 		Edge    string `json:"edge"`
+		Group   string `json:"group"`
 		CSR     string `json:"csr"`
 	}
 	if p := readJSON(r, &req); p != nil {
@@ -252,7 +422,7 @@ func (h *Handler) issue(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	got, err := h.CA.Issue(r.Context(), actor(r), ca.IssueRequest{Profile: req.Profile,
-		Material: ca.Material{Tenant: req.Tenant, AP: req.AP, Edge: req.Edge}, CSR: []byte(req.CSR)})
+		Material: ca.Material{Tenant: req.Tenant, AP: req.AP, Edge: req.Edge, Group: req.Group}, CSR: []byte(req.CSR)})
 	if err != nil {
 		h.fail(w, r, err)
 		return
@@ -303,17 +473,17 @@ func (h *Handler) revoke(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) listCerts(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
-	f := db.CertFilter{Tenant: q.Get("tenant"), Profile: q.Get("profile"), AP: q.Get("ap"), Edge: q.Get("edge"), Status: q.Get("status"), Limit: 100}
-	for param, v := range map[string]string{"tenant": f.Tenant, "ap": f.AP, "edge": f.Edge} {
+	f := db.CertFilter{Tenant: q.Get("tenant"), Profile: q.Get("profile"), AP: q.Get("ap"), Edge: q.Get("edge"), Group: q.Get("group"), Status: q.Get("status"), Limit: 100}
+	for param, v := range map[string]string{"tenant": f.Tenant, "ap": f.AP, "edge": f.Edge, "group": f.Group} {
 		if v != "" && !names.ValidSlug(v) {
 			badRequest(param, "must follow the naming rule").write(w)
 			return
 		}
 	}
 	switch f.Profile {
-	case "", db.ProfileAPClient, db.ProfileProbeClient, db.ProfileTenantServer:
+	case "", db.ProfileAPClient, db.ProfileGroupClient, db.ProfileProbeClient, db.ProfileTenantServer:
 	default:
-		badRequest("profile", "must be ap-client, probe-client or tenant-server").write(w)
+		badRequest("profile", "must be ap-client, group-client, probe-client or tenant-server").write(w)
 		return
 	}
 	switch f.Status {

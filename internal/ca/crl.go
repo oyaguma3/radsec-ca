@@ -105,10 +105,20 @@ func (s *Service) DisableCA(ctx context.Context, a Actor, caID string) error {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if _, err := s.DB.CA(ctx, caID); errors.Is(err, db.ErrNotFound) {
+	c, err := s.DB.CA(ctx, caID)
+	if errors.Is(err, db.ErrNotFound) {
 		return newError(CauseCANotFound, "caId", "CA %s はありません", caID)
 	} else if err != nil {
 		return err
+	}
+	// 持ち込みの CA は取得を止めて API キーを消す。発行していないので失効はなく、最新の CRL は配り続ける（§19.2）。
+	if c.Kind == db.KindTenantBrought {
+		changed, err := s.DB.DisableBrought(ctx, caID)
+		if err != nil || !changed {
+			return err
+		}
+		s.audit(ctx, a, "ca.disable", caID, "ok", map[string]any{"brought": true})
+		return nil
 	}
 	changed, err := s.DB.DisableCA(ctx, caID)
 	if err != nil || !changed {
@@ -140,6 +150,10 @@ func (s *Service) RefreshCRLs(ctx context.Context) int {
 	}
 	failed := 0
 	for _, c := range cas {
+		// 持ち込みの CA の CRL は本CA が作らない（RefreshBroughtCRLs が取りに行く）。
+		if c.Kind == db.KindTenantBrought {
+			continue
+		}
 		latest, err := s.DB.LatestCRL(ctx, c.ID)
 		now := s.Now()
 		due := errors.Is(err, db.ErrNotFound) || (err == nil && (now.Sub(latest.ThisUpdate) >= s.CRLRefresh || latest.NextUpdate.Sub(now) < minRemaining))
@@ -183,9 +197,21 @@ func (s *Service) CRLErrors() map[string]string {
 	return maps.Clone(s.crlErrors)
 }
 
-// Run は定期の処理（CRL の作り直しと、期限の切れた冪等の記録の削除）を、ctx が終わるまで 1 分ごとに動かす
-// （起動したときにも 1 回行う）。
+// Run は定期の処理（CRL の作り直し、持ち込みの CA の CRL の取得、期限の切れた冪等の記録の削除）を、ctx が終わるまで
+// 1 分ごとに動かす（起動したときにも 1 回行う）。持ち込みの CA の取得は外への通信で時間がかかるので、別の流れで動かす。
 func (s *Service) Run(ctx context.Context) {
+	if s.Fetcher != nil {
+		go func() {
+			for {
+				s.RefreshBroughtCRLs(ctx)
+				select {
+				case <-ctx.Done():
+					return
+				case <-time.After(time.Minute):
+				}
+			}
+		}()
+	}
 	for {
 		s.RefreshCRLs(ctx)
 		if _, err := s.DB.PurgeIdempotency(ctx); err != nil && ctx.Err() == nil {

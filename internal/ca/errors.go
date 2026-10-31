@@ -7,14 +7,20 @@ import (
 
 // 誤りの理由の符号（管理API の ProblemDetails の cause。設計概要 §9.1）。
 const (
-	CauseValidation         = "VALIDATION_ERROR"
-	CauseCSRInvalid         = "CSR_INVALID"
-	CauseKeyTypeUnsupported = "KEY_TYPE_UNSUPPORTED"
-	CauseNameReserved       = "NAME_RESERVED"
-	CauseCANotFound         = "CA_NOT_FOUND"
-	CauseCAExists           = "CA_EXISTS"
-	CauseCADisabled         = "CA_DISABLED"
-	CauseCertNotFound       = "CERT_NOT_FOUND"
+	CauseValidation             = "VALIDATION_ERROR"
+	CauseCSRInvalid             = "CSR_INVALID"
+	CauseKeyTypeUnsupported     = "KEY_TYPE_UNSUPPORTED"
+	CauseNameReserved           = "NAME_RESERVED"
+	CauseCANotFound             = "CA_NOT_FOUND"
+	CauseCAExists               = "CA_EXISTS"
+	CauseCADisabled             = "CA_DISABLED"
+	CauseCertNotFound           = "CERT_NOT_FOUND"
+	CauseCRLNotFound            = "CRL_NOT_FOUND"
+	CauseCRLInvalid             = "CRL_INVALID"
+	CauseCRLRequired            = "CRL_REQUIRED"
+	CauseFingerprintInUse       = "CA_FINGERPRINT_IN_USE"
+	CauseTenantOnlyNotConfirmed = "TENANT_ONLY_NOT_CONFIRMED"
+	CauseNoCRLNotAccepted       = "NO_CRL_NOT_ACCEPTED"
 )
 
 // Error は呼び出し側の誤り（理由の符号と、利用者に見せる文）。

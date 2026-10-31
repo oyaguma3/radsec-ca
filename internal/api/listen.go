@@ -20,13 +20,13 @@ type ListenOptions struct {
 	Addr string
 	// GetCertificate はサーバー証明書を返す。
 	GetCertificate func(*tls.ClientHelloInfo) (*tls.Certificate, error)
-	// AdminClients は管理クライアントの証明書のフィンガープリント（SHA-256、16 進小文字）から識別名を引く。
-	AdminClients map[string]string
-	Handler      http.Handler
-	Log          *slog.Logger
+	// Pins は管理クライアントのピン（SIGHUP で読み直す）。
+	Pins    *Pins
+	Handler http.Handler
+	Log     *slog.Logger
 }
 
-// Run は管理API の HTTPS リスナー（mTLS）を起動し、ctx が終了するかリスナーが失敗するまで待つ（eapaka-node-provisioner の
+// Run は管理API の HTTPS リスナー（mTLS）を起動し、ctx が終了するかリスナーが失敗するまで待つ（aka-provisioner の
 // internal/server と同じ作り）。管理クライアントは、クライアント証明書のフィンガープリントで照合する（CA は使わない。§9.1）。
 // 証明書なし・未登録・有効期間外の接続は、TLS のハンドシェイクで断る。
 func Run(ctx context.Context, opts ListenOptions) error {
@@ -50,7 +50,7 @@ func Serve(ctx context.Context, ln net.Listener, opts ListenOptions) error {
 	}
 	errc := make(chan error, 1)
 	go func() { errc <- srv.ServeTLS(ln, "", "") }()
-	opts.Log.Info("listening", "addr", ln.Addr().String(), "admin_clients", len(opts.AdminClients))
+	opts.Log.Info("listening", "addr", ln.Addr().String(), "admin_clients", opts.Pins.Fingerprints())
 	select {
 	case <-ctx.Done():
 		opts.Log.Info("shutting down")
@@ -80,7 +80,7 @@ func TLSConfig(opts ListenOptions) *tls.Config {
 			}
 			cert := cs.PeerCertificates[0]
 			fp := certs.Fingerprint(cert)
-			if _, ok := opts.AdminClients[fp]; !ok {
+			if _, ok := opts.Pins.lookup(fp); !ok {
 				opts.Log.Warn("admin client certificate rejected", "event_id", "CA_AUTH_REJECTED", "reason", "not configured", "fingerprint", fp)
 				return errors.New("client certificate is not a configured admin client")
 			}
@@ -91,12 +91,4 @@ func TLSConfig(opts ListenOptions) *tls.Config {
 			return nil
 		},
 	}
-}
-
-// AdminClientName は、要求を送ってきた管理クライアントの識別名を返す。mTLS でなければ空文字列。
-func AdminClientName(r *http.Request, clients map[string]string) string {
-	if r.TLS == nil || len(r.TLS.PeerCertificates) == 0 {
-		return ""
-	}
-	return clients[certs.Fingerprint(r.TLS.PeerCertificates[0])]
 }

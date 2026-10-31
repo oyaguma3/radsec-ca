@@ -155,3 +155,50 @@ func TestEdgeRules(t *testing.T) {
 		t.Error("CRL does not pass CheckCRL")
 	}
 }
+
+// 持ち込みの CA（自己署名でない中間 CA）の CRL を openssl が受け付け、グループの証明書が URN の形で検証できることを確かめる。
+func TestOpensslBroughtAndGroup(t *testing.T) {
+	if os.Getenv("CA_TEST_OPENSSL") == "" {
+		t.Skip("set CA_TEST_OPENSSL=1 to run the openssl tests")
+	}
+	svc, d := catest.New(t)
+	ctx := t.Context()
+	root := catest.NewVendorCA(t, "vendor root")
+	v := catest.NewIntermediateCA(t, root, "vendor org CA")
+	c, err := svc.RegisterBrought(ctx, ca.System, ca.BroughtRequest{Tenant: "tenant-a", Name: "v", CertPEM: v.PEM, TenantOnlyConfirmed: true,
+		CRL: ca.CRLSource{Source: db.CRLSourceUpload, PEM: catest.CRLPEM(v.CRL(t, catest.CRLOptions{Number: 3}))}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	write := func(name string, b []byte) string {
+		p := filepath.Join(dir, name)
+		if err := os.WriteFile(p, b, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	latest, err := d.LatestCRL(ctx, c.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	caFile := write("v.pem", ca.CertPEM(c.CertDER))
+	crlFile := write("v.crl", catest.CRLPEM(latest.DER))
+	if out, err := exec.Command("openssl", "crl", "-in", crlFile, "-CAfile", caFile, "-noout").CombinedOutput(); err != nil || !strings.Contains(string(out), "verify OK") {
+		t.Errorf("openssl crl -CAfile: %v\n%s", err, out)
+	}
+	if _, err := svc.CreateTenantCA(ctx, ca.System, "tenant-a"); err != nil {
+		t.Fatal(err)
+	}
+	got, err := svc.Issue(ctx, ca.System, ca.IssueRequest{Profile: db.ProfileGroupClient, Material: ca.Material{Tenant: "tenant-a", Group: "unifi"}, CSR: catest.CSR(t, catest.Key(t))})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out, err := exec.Command("openssl", "verify", "-CAfile", write("t.pem", got.CAPEM), write("g.pem", got.CertPEM)).CombinedOutput(); err != nil {
+		t.Errorf("openssl verify: %v\n%s", err, out)
+	}
+	text, err := exec.Command("openssl", "x509", "-in", filepath.Join(dir, "g.pem"), "-noout", "-ext", "subjectAltName").CombinedOutput()
+	if err != nil || !strings.Contains(string(text), "URI:urn:example:grp:tenant-a:unifi") {
+		t.Errorf("SAN: %v\n%s", err, text)
+	}
+}

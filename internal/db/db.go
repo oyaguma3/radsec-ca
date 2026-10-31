@@ -37,6 +37,8 @@ type DB struct {
 	sql *sql.DB
 	// now は現在時刻（テストで差し替える）。
 	now func() time.Time
+	// auditSink は監査ログの写しの書き先（なければ nil）。
+	auditSink AuditSink
 }
 
 // Open は SQLite のファイルを開く（なければ作る）。WAL、外部キー、待ち時間を有効にする。

@@ -14,8 +14,10 @@ const keepCRLs = 30
 
 // CRL は作った CRL。
 type CRL struct {
-	CAID                   string
+	CAID string
+	// Number は CA ごとのこちらの連番。ExtNumber は持ち込みの CRL の cRLNumber（10 進の文字列。なければ空。§19.3）。
 	Number                 int64
+	ExtNumber              string
 	ThisUpdate, NextUpdate time.Time
 	DER                    []byte
 	CreatedAt              time.Time
@@ -73,21 +75,48 @@ func (d *DB) InsertCRL(ctx context.Context, c CRL) error {
 		if n, _ := res.RowsAffected(); n == 0 {
 			return fmt.Errorf("insert crl %s #%d: %w", c.CAID, c.Number, ErrConflict)
 		}
-		if _, err := tx.ExecContext(ctx, `INSERT INTO crls (ca_id, number, this_update, next_update, der, created_at) VALUES (?, ?, ?, ?, ?, ?)`,
-			c.CAID, c.Number, millis(c.ThisUpdate), millis(c.NextUpdate), c.DER, millis(c.CreatedAt)); err != nil {
+		return insertCRL(ctx, tx, c)
+	})
+}
+
+// insertCRL は CRL の行を入れ、古い CRL を消す（tx の中で呼ぶ）。
+func insertCRL(ctx context.Context, tx *sql.Tx, c CRL) error {
+	if _, err := tx.ExecContext(ctx, `INSERT INTO crls (ca_id, number, this_update, next_update, der, created_at, ext_number) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		c.CAID, c.Number, millis(c.ThisUpdate), millis(c.NextUpdate), c.DER, millis(c.CreatedAt), c.ExtNumber); err != nil {
+		return err
+	}
+	_, err := tx.ExecContext(ctx, "DELETE FROM crls WHERE ca_id = ? AND number <= ?", c.CAID, c.Number-keepCRLs)
+	return err
+}
+
+// appendCRL は CA の連番を 1 つ進めて CRL を置く（持ち込みの CA。tx の中で呼ぶ）。
+func appendCRL(ctx context.Context, tx *sql.Tx, id string, c CRL) error {
+	var n int64
+	if err := tx.QueryRowContext(ctx, "UPDATE cas SET crl_number = crl_number + 1 WHERE id = ? RETURNING crl_number", id).Scan(&n); err != nil {
+		return fmt.Errorf("append crl %s: %w", id, err)
+	}
+	c.CAID, c.Number = id, n
+	return insertCRL(ctx, tx, c)
+}
+
+// PutBroughtCRL は持ち込みの CA の新しい CRL を置き、取得の状態を書く（1 つのトランザクション）。
+func (d *DB) PutBroughtCRL(ctx context.Context, id string, c CRL, s CRLState) error {
+	return d.tx(ctx, func(tx *sql.Tx) error {
+		if err := appendCRL(ctx, tx, id, c); err != nil {
 			return err
 		}
-		_, err = tx.ExecContext(ctx, "DELETE FROM crls WHERE ca_id = ? AND number <= ?", c.CAID, c.Number-keepCRLs)
+		_, err := tx.ExecContext(ctx, `UPDATE cas SET crl_etag = ?, crl_modified = ?, crl_checked_at = ?, crl_ok_at = ?, crl_failures = ?, crl_last_error = ? WHERE id = ?`,
+			s.ETag, s.Modified, millis(s.CheckedAt), millis(s.OKAt), s.Failures, s.LastError, id)
 		return err
 	})
 }
 
-const crlColumns = "ca_id, number, this_update, next_update, der, created_at"
+const crlColumns = "ca_id, number, this_update, next_update, der, created_at, ext_number"
 
 func scanCRL(s interface{ Scan(...any) error }) (CRL, error) {
 	var c CRL
 	var tu, nu, ca int64
-	if err := s.Scan(&c.CAID, &c.Number, &tu, &nu, &c.DER, &ca); err != nil {
+	if err := s.Scan(&c.CAID, &c.Number, &tu, &nu, &c.DER, &ca, &c.ExtNumber); err != nil {
 		return CRL{}, err
 	}
 	c.ThisUpdate, c.NextUpdate, c.CreatedAt = fromMillis(tu), fromMillis(nu), fromMillis(ca)

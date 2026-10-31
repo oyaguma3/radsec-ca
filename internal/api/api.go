@@ -24,8 +24,8 @@ import (
 )
 
 const (
-	// maxBodyBytes は要求の本文の上限（CSR は 16 KB まで）。
-	maxBodyBytes = 64 << 10
+	// maxBodyBytes は要求の本文の上限（aka-provisioner の中継の上限と同じ。CRL のアップロードに要る。CSR は別に 16 KB まで）。
+	maxBodyBytes = 1 << 20
 	// idempotencyTTL は応答を覚えておく時間、idempotencyPendingTTL は処理中の記録の有効期限（§9.2）。
 	idempotencyTTL        = 24 * time.Hour
 	idempotencyPendingTTL = time.Minute
@@ -77,6 +77,9 @@ var Routes = []Route{
 	{"GET", "/cas/{caId}", func(h *Handler) http.HandlerFunc { return h.getCA }, false},
 	{"POST", "/cas/{caId}/disable", func(h *Handler) http.HandlerFunc { return h.disableCA }, true},
 	{"GET", "/cas/{caId}/crl", func(h *Handler) http.HandlerFunc { return h.getCRL }, false},
+	{"PUT", "/cas/{caId}/crl", func(h *Handler) http.HandlerFunc { return h.putCRL }, true},
+	{"POST", "/cas/{caId}/crl:refresh", func(h *Handler) http.HandlerFunc { return h.refreshCRL }, true},
+	{"PUT", "/cas/{caId}/crl-source", func(h *Handler) http.HandlerFunc { return h.putCRLSource }, true},
 	{"GET", "/certs", func(h *Handler) http.HandlerFunc { return h.listCerts }, false},
 	{"POST", "/certs", func(h *Handler) http.HandlerFunc { return h.issue }, true},
 	{"GET", "/certs/{serial}", func(h *Handler) http.HandlerFunc { return h.getCert }, false},
@@ -182,7 +185,7 @@ func withFallback(mux *http.ServeMux) http.Handler {
 			return
 		}
 		var allow []string
-		for _, m := range []string{http.MethodGet, http.MethodPost} {
+		for _, m := range []string{http.MethodGet, http.MethodPost, http.MethodPut} {
 			probe := r.Clone(r.Context())
 			probe.Method = m
 			if _, pattern := mux.Handler(probe); pattern != "" {

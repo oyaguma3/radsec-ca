@@ -9,6 +9,9 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -57,15 +60,14 @@ func newTestEnv(t *testing.T) *testEnv {
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 	srvCert := keyPair(t, true)
 	clientCert := keyPair(t, false)
-	clients := map[string]string{certs.Fingerprint(clientCert.Leaf): "provisioner"}
-	h := &Handler{Log: log, DB: d, CA: svc, Version: "test", KEKID: "0011223344556677",
-		MgmtClient: func(r *http.Request) string { return AdminClientName(r, clients) }}
+	pins := NewPins(Clients{certs.Fingerprint(clientCert.Leaf): "provisioner"})
+	h := &Handler{Log: log, DB: d, CA: svc, Version: "test", KEKID: "0011223344556677", MgmtClient: pins.NameFromRequest}
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
 	go Serve(t.Context(), ln, ListenOptions{GetCertificate: func(*tls.ClientHelloInfo) (*tls.Certificate, error) { return &srvCert, nil },
-		AdminClients: clients, Handler: h.Routes(), Log: log})
+		Pins: pins, Handler: h.Routes(), Log: log})
 	pool := x509.NewCertPool()
 	pool.AddCert(srvCert.Leaf)
 	tr := &http.Transport{TLSClientConfig: &tls.Config{RootCAs: pool, Certificates: []tls.Certificate{clientCert}}}
@@ -245,5 +247,187 @@ func TestFallbackAndHeaders(t *testing.T) {
 	expect(t, "bad operator", e.do(t, "GET", "/status", nil, map[string]string{"X-Operator-Id": "a b"}), 400, ca.CauseValidation)
 	if r := e.do(t, "GET", "/status", nil, map[string]string{"X-Trace-ID": "bad id!"}); len(r.header.Get("X-Trace-ID")) != 32 {
 		t.Errorf("trace id was not generated: %q", r.header.Get("X-Trace-ID"))
+	}
+}
+
+// call は JSON の要求を送り、ステータスと本文を返す。
+func (e *testEnv) call(t *testing.T, method, path, key string, body any) (int, map[string]any) {
+	t.Helper()
+	var rd io.Reader
+	if body != nil {
+		b, err := json.Marshal(body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		rd = bytes.NewReader(b)
+	}
+	req, err := http.NewRequest(method, e.url+path, rd)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if key != "" {
+		req.Header.Set("Idempotency-Key", key)
+	}
+	req.Header.Set("X-Operator-Id", "d@example.com")
+	resp, err := e.client.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	var out map[string]any
+	b, _ := io.ReadAll(resp.Body)
+	if len(b) > 0 {
+		if err := json.Unmarshal(b, &out); err != nil {
+			t.Fatalf("%s %s: %s: %v", method, path, b, err)
+		}
+	}
+	return resp.StatusCode, out
+}
+
+func TestBroughtAPI(t *testing.T) {
+	e := newTestEnv(t)
+	v := catest.NewVendorCA(t, "vendor")
+	body := v.CRL(t, catest.CRLOptions{Number: 3})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.Write(body) }))
+	defer srv.Close()
+
+	// 種類を付けないと持ち込みの項目は受けない。
+	s, out := e.call(t, "POST", "/cas", "k0", map[string]any{"tenant": "tenant-a", "name": "v"})
+	if s != 400 {
+		t.Errorf("no kind: %d %v", s, out)
+	}
+	s, out = e.call(t, "POST", "/cas", "k1", map[string]any{"tenant": "tenant-a", "kind": "brought", "name": "v", "certPem": string(v.PEM),
+		"crl": map[string]any{"source": "url", "url": srv.URL}})
+	if s != 422 || out["cause"] != ca.CauseTenantOnlyNotConfirmed {
+		t.Errorf("not confirmed: %d %v", s, out)
+	}
+	s, out = e.call(t, "POST", "/cas", "k2", map[string]any{"tenant": "tenant-a", "kind": "brought", "name": "v", "certPem": string(v.PEM),
+		"crl": map[string]any{"source": "url", "url": srv.URL}, "tenantOnlyConfirmed": true})
+	if s != 201 {
+		t.Fatalf("register: %d %v", s, out)
+	}
+	if out["id"] != "brought.tenant-a.v" || out["kind"] != "tenant-brought" || out["selfSigned"] != true || out["hasCrl"] != true ||
+		out["crlSource"] != "url" || out["tenantOnlyConfirmedBy"] != "d@example.com" || out["fingerprint"] == "" {
+		t.Errorf("registered: %v", out)
+	}
+	if crl, _ := out["crl"].(map[string]any); crl["extNumber"] != "3" {
+		t.Errorf("crl: %v", out["crl"])
+	}
+	// 同じ CA を別のテナントに。
+	s, out = e.call(t, "POST", "/cas", "k3", map[string]any{"tenant": "tenant-b", "kind": "brought", "name": "v", "certPem": string(v.PEM),
+		"crl": map[string]any{"source": "url", "url": srv.URL}, "tenantOnlyConfirmed": true})
+	if s != 409 || out["cause"] != ca.CauseFingerprintInUse {
+		t.Errorf("duplicate: %d %v", s, out)
+	}
+	// 取り直し。キーは必須。
+	s, _ = e.call(t, "POST", "/cas/brought.tenant-a.v/crl:refresh", "", nil)
+	if s != 400 {
+		t.Errorf("refresh without key: %d", s)
+	}
+	s, out = e.call(t, "POST", "/cas/brought.tenant-a.v/crl:refresh", "k4", nil)
+	if s != 200 {
+		t.Errorf("refresh: %d %v", s, out)
+	}
+	// テナントで絞る。
+	if s, out = e.call(t, "GET", "/cas?tenant=tenant-a", "", nil); s != 200 || len(out["items"].([]any)) != 1 {
+		t.Errorf("list: %d %v", s, out)
+	}
+	if s, out = e.call(t, "GET", "/cas?tenant=Bad", "", nil); s != 400 {
+		t.Errorf("list bad: %d %v", s, out)
+	}
+	// 取得先を none に変える。CRL は読めなくなる。
+	s, out = e.call(t, "PUT", "/cas/brought.tenant-a.v/crl-source", "k5", map[string]any{"crl": map[string]any{"source": "none"}})
+	if s != 422 || out["cause"] != ca.CauseNoCRLNotAccepted {
+		t.Errorf("none: %d %v", s, out)
+	}
+	s, out = e.call(t, "PUT", "/cas/brought.tenant-a.v/crl-source", "k6", map[string]any{"crl": map[string]any{"source": "none"}, "noCrlAccepted": true})
+	if s != 200 || out["hasCrl"] != false || out["crl"] != nil {
+		t.Errorf("none accepted: %d %v", s, out)
+	}
+	if s, out = e.call(t, "GET", "/cas/brought.tenant-a.v/crl", "", nil); s != 404 || out["cause"] != ca.CauseCRLNotFound {
+		t.Errorf("crl of none: %d %v", s, out)
+	}
+	// アップロードに替えて、CRL を置く。
+	s, out = e.call(t, "PUT", "/cas/brought.tenant-a.v/crl-source", "k7", map[string]any{"crl": map[string]any{"source": "upload", "pem": string(catest.CRLPEM(v.CRL(t, catest.CRLOptions{Number: 4})))}})
+	if s != 200 || out["crlSource"] != "upload" {
+		t.Fatalf("to upload: %d %v", s, out)
+	}
+	s, out = e.call(t, "PUT", "/cas/brought.tenant-a.v/crl", "k8", map[string]any{"pem": string(catest.CRLPEM(v.CRL(t, catest.CRLOptions{Number: 5})))})
+	if s != 200 {
+		t.Errorf("upload: %d %v", s, out)
+	}
+	s, out = e.call(t, "GET", "/cas/brought.tenant-a.v/crl", "", nil)
+	if s != 200 || out["extNumber"] != "5" {
+		t.Errorf("crl: %d %v", s, out)
+	}
+	s, out = e.call(t, "PUT", "/cas/brought.tenant-a.v/crl", "k9", map[string]any{"pem": string(catest.CRLPEM(v.CRL(t, catest.CRLOptions{Number: 1})))})
+	if s != 422 || out["cause"] != ca.CauseCRLInvalid {
+		t.Errorf("older CRL: %d %v", s, out)
+	}
+	// 止める。
+	if s, out = e.call(t, "POST", "/cas/brought.tenant-a.v/disable", "k10", nil); s != 200 || out["status"] != "disabled" {
+		t.Errorf("disable: %d %v", s, out)
+	}
+	if s, out = e.call(t, "PUT", "/cas/brought.tenant-a.v/crl", "k11", map[string]any{"pem": "x"}); s != 409 || out["cause"] != ca.CauseCADisabled {
+		t.Errorf("upload to disabled: %d %v", s, out)
+	}
+	// 発行した CA には口がない。
+	if s, _ = e.call(t, "POST", "/cas", "k12", map[string]any{"tenant": "tenant-a"}); s != 201 {
+		t.Errorf("create: %d", s)
+	}
+	if s, out = e.call(t, "POST", "/cas/tenant.tenant-a/crl:refresh", "k13", nil); s != 400 {
+		t.Errorf("refresh issued: %d %v", s, out)
+	}
+	// グループの証明書。
+	s, out = e.call(t, "POST", "/certs", "k14", map[string]any{"profile": "group-client", "tenant": "tenant-a", "group": "unifi", "csr": string(catest.CSR(t, catest.Key(t)))})
+	if s != 201 || out["group"] != "unifi" || out["sanUri"] != "urn:example:grp:tenant-a:unifi" {
+		t.Errorf("group: %d %v", s, out)
+	}
+	if s, out = e.call(t, "GET", "/certs?group=unifi&profile=group-client", "", nil); s != 200 || len(out["items"].([]any)) != 1 {
+		t.Errorf("list group: %d %v", s, out)
+	}
+	// 大きな本文も受ける（CRL のアップロード。1 MiB まで）。
+	if s, out = e.call(t, "POST", "/cas", "k15", map[string]any{"tenant": strings.Repeat("a", 32), "certPem": strings.Repeat("x", 100<<10)}); s != 400 || out["detail"] == "request body is too large or could not be read" {
+		t.Errorf("large: %d %v", s, out)
+	}
+}
+
+func TestPinsReload(t *testing.T) {
+	fpA, fpB := strings.Repeat("aa", 32), strings.Repeat("bb", 32)
+	file := filepath.Join(t.TempDir(), "admin-clients")
+	write := func(s string) {
+		t.Helper()
+		if err := os.WriteFile(file, []byte(s), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := LoadPins(file); err == nil {
+		t.Error("missing file accepted")
+	}
+	write("# コメント\nprovisioner=" + fpA + "\n")
+	p, err := LoadPins(file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n, ok := p.lookup(fpA); !ok || n != "provisioner" {
+		t.Errorf("lookup: %s %v", n, ok)
+	}
+	// 同じ識別名に新旧の 2 つ。コロン区切りと大文字も受ける。
+	write("provisioner=" + fpA + "\nprovisioner=" + strings.ToUpper(strings.Repeat("BB:", 31)+"BB") + "\n")
+	if err := p.Reload(); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := p.lookup(fpB); !ok || p.Fingerprints() != 2 || len(p.Names()) != 1 {
+		t.Errorf("after reload: %d %v", p.Fingerprints(), p.Names())
+	}
+	// 読み直せないときは前のまま。
+	for _, bad := range []string{"", "# なし\n", "provisioner", "p=short", "bad name=" + fpA, "a=" + fpA + "\nb=" + fpA} {
+		write(bad)
+		if err := p.Reload(); err == nil {
+			t.Errorf("Reload(%q) = nil", bad)
+		}
+		if _, ok := p.lookup(fpB); !ok {
+			t.Errorf("Reload(%q) dropped the pins", bad)
+		}
 	}
 }

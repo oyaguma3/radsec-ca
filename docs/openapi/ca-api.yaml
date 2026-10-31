@@ -1,16 +1,20 @@
 openapi: 3.1.0
 info:
   title: radsec-ca 管理API
-  version: 0.1.0
+  version: 0.2.0
   description: |
-    radsec-ca（RadSec のエッジのための独立した CA）の管理API（設計概要 §9）。呼び出し側は eapaka-node-provisioner だけで、全権として扱う。
+    radsec-ca（RadSec のエッジのための独立した CA）の管理API（設計概要 §9）。呼び出し側は aka-provisioner だけで、全権として扱う。
 
-    - 認証は mTLS。管理クライアントの証明書の SHA-256 フィンガープリントを、本CA の `CA_ADMIN_CLIENTS` と照合する（CA は使わない）。
-      証明書なし・未登録・有効期間外の接続は TLS のハンドシェイクで断る。サーバー証明書は自己署名（`radsec-ca server-cert` で取り出す）。
+    - 認証は mTLS。管理クライアントの証明書の SHA-256 フィンガープリントを、ピンのファイル（`CA_ADMIN_CLIENTS_FILE`。`SIGHUP` で読み直す）と
+      照合する（CA は使わない）。証明書なし・未登録・有効期間外の接続は TLS のハンドシェイクで断る。サーバー証明書は自己署名
+      （`radsec-ca server-cert` で取り出す）。
     - `X-Operator-Id`（任意）は監査ログの操作者になる。`X-Trace-ID`（任意）は受け取るか採番し、応答のヘッダーで返す。
-    - 変更の口（CA の作成と停止、発行、失効）は `Idempotency-Key` が必須。同じ鍵・同じ本文の再送には前の応答を返し
+    - 変更の口（CA の作成・登録・停止、CRL の取得先と置き直し、発行、失効）は `Idempotency-Key` が必須。同じ鍵・同じ本文の再送には前の応答を返し
       （`Idempotent-Replayed: true`）、本文が違えば 409 `IDEMPOTENCY_CONFLICT`。応答は 24 時間覚える（5xx は覚えない）。
-    - 証明書の CN・SAN・EKU・有効期限は、プロファイルと名前の材料（テナント、AP、エッジ）から本CA が決める。CSR から使うのは公開鍵だけ。
+    - 証明書の CN・SAN・EKU・有効期限は、プロファイルと名前の材料（テナント、AP、グループ、エッジ）から本CA が決める。CSR から使うのは公開鍵だけ。
+    - 持ち込みの CA の登録（`POST /cas` の `kind: brought`）・CRL の取得先の変更・取り直しは、業者の口へ取りに行くので時間がかかる
+      （上限は `CA_BROUGHT_CRL_TIMEOUT`、既定 20 秒）。呼び出し側のタイムアウトはこれより長くする。
+    - 要求の本文は 1 MiB まで。
     - エラーは ProblemDetails（`application/problem+json`）で、`cause` に理由の符号を入れる。
 servers:
   - url: https://{host}:9448
@@ -35,9 +39,15 @@ paths:
     get:
       summary: CA の一覧
       operationId: listCAs
+      parameters:
+        - name: tenant
+          in: query
+          description: このテナントの CA（発行した CA と持ち込みの CA）だけを返す
+          schema:
+            $ref: "#/components/schemas/Name"
       responses:
         "200":
-          description: CA の一覧（server が先頭）
+          description: CA の一覧（server が先頭で、ほかは ID の順）
           content:
             application/json:
               schema:
@@ -48,8 +58,10 @@ paths:
                     type: array
                     items:
                       $ref: "#/components/schemas/CA"
+        "400":
+          $ref: "#/components/responses/Problem"
     post:
-      summary: テナントのクライアントCA（tenant.<slug>）の作成
+      summary: テナントのクライアントCA（tenant.<slug>）の作成、または持ち込みの CA（brought.<slug>.<名前>）の登録
       operationId: createCA
       parameters:
         - $ref: "#/components/parameters/IdempotencyKey"
@@ -62,12 +74,34 @@ paths:
               type: object
               additionalProperties: false
               required: [tenant]
+              description: |
+                kind を省くとテナントのクライアントCA を作る（tenant だけを与える）。
+                kind が brought なら持ち込みの CA を登録する（name・certPem・crl・tenantOnlyConfirmed が必須）。
+                url・meraki・upload では、その場で CRL が取れて確かめられたときだけ成功し、失敗なら何も残さない。
               properties:
                 tenant:
                   $ref: "#/components/schemas/Name"
+                kind:
+                  type: string
+                  enum: [brought]
+                name:
+                  $ref: "#/components/schemas/Name"
+                certPem:
+                  type: string
+                  description: |
+                    CA の証明書（PEM を 1 つ。16 KB まで）。BasicConstraints が CA、KeyUsage に keyCertSign（CRL を配るなら cRLSign も）、
+                    有効期間の中、鍵は ECDSA P-256 / P-384 / P-521 か RSA 2048 ビット以上。同じ CA が有効なまま登録されていれば 409
+                crl:
+                  $ref: "#/components/schemas/CRLSource"
+                tenantOnlyConfirmed:
+                  type: boolean
+                  description: このテナント専用の CA であることを確かめた（必須。操作者と時刻を記録する）
+                noCrlAccepted:
+                  type: boolean
+                  description: crl.source が none のとき、CRL がなく業者の AP の失効が効かないことの了承（必須）
       responses:
         "201":
-          description: 作った CA（最初の CRL も作る）
+          description: 作った CA（テナントのクライアントCA は最初の CRL も作る）
           headers:
             Location:
               schema:
@@ -79,7 +113,13 @@ paths:
         "400":
           $ref: "#/components/responses/Problem"
         "409":
-          description: CA_EXISTS（すでにある）、IDEMPOTENCY_CONFLICT
+          description: CA_EXISTS（すでにある）、CA_FINGERPRINT_IN_USE（同じ CA が有効なまま登録されている）、IDEMPOTENCY_CONFLICT
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+        "422":
+          description: KEY_TYPE_UNSUPPORTED、CRL_INVALID（CRL を取れない・置けない）、CRL_REQUIRED、TENANT_ONLY_NOT_CONFIRMED、NO_CRL_NOT_ACCEPTED
           content:
             application/problem+json:
               schema:
@@ -101,7 +141,10 @@ paths:
           $ref: "#/components/responses/Problem"
   /cas/{caId}/disable:
     post:
-      summary: テナントをやめる（発行を止め、有効な証明書を cessationOfOperation で失効させる。CRL は作り続ける）
+      summary: CA を停止する
+      description: |
+        テナントのクライアントCA は、発行を止め、有効な証明書を cessationOfOperation で失効させる（CRL は作り続ける）。
+        持ち込みの CA は、CRL の取得を止めて API キーを消す（最新の CRL は配り続ける）。エッジから外し終えてから行う。
       operationId: disableCA
       parameters:
         - $ref: "#/components/parameters/CAID"
@@ -146,8 +189,144 @@ paths:
                   crl:
                     type: string
                     description: PEM（X509 CRL）
+                  extNumber:
+                    type: string
+                    description: 持ち込みの CRL の cRLNumber（10 進の文字列。なければ省く）
+        "404":
+          description: CA_NOT_FOUND、CRL_NOT_FOUND（CRL のない CA）
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+    put:
+      summary: CRL を置く（取得先が upload の持ち込みの CA）
+      operationId: putCRL
+      parameters:
+        - $ref: "#/components/parameters/CAID"
+        - $ref: "#/components/parameters/IdempotencyKey"
+        - $ref: "#/components/parameters/OperatorID"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [pem]
+              properties:
+                pem:
+                  type: string
+                  description: PEM の CRL
+      responses:
+        "200":
+          description: CA
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CA"
+        "400":
+          description: VALIDATION_ERROR（取得先が upload でない）
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/Problem"
         "404":
           $ref: "#/components/responses/Problem"
+        "409":
+          description: CA_DISABLED、IDEMPOTENCY_CONFLICT
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+        "422":
+          description: CRL_INVALID（署名、発行者、期限、番号の後退、差分の CRL。今の CRL を残す）
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+  /cas/{caId}/crl:refresh:
+    post:
+      summary: CRL をすぐ取りに行く（取得先が url か meraki の持ち込みの CA）
+      operationId: refreshCRL
+      parameters:
+        - $ref: "#/components/parameters/CAID"
+        - $ref: "#/components/parameters/IdempotencyKey"
+        - $ref: "#/components/parameters/OperatorID"
+      responses:
+        "200":
+          description: CA
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CA"
+        "400":
+          description: VALIDATION_ERROR（取りに行けない取得先）
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+        "404":
+          $ref: "#/components/responses/Problem"
+        "409":
+          description: CA_DISABLED、IDEMPOTENCY_CONFLICT
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+        "422":
+          description: CRL_INVALID（取れない・置けない。今の CRL を残し、失敗を crlState に記録する）
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+  /cas/{caId}/crl-source:
+    put:
+      summary: CRL の取得先を変える（持ち込みの CA）
+      description: |
+        新しい取得先から取れると確かめてから替える。Meraki の API キーは、組織の ID だけを変えるときは省ける（今のキーを使う）。
+        none との間で替えるとエッジの CRLCheck が変わるので、呼び出し側がエッジに反映し直す。
+      operationId: putCRLSource
+      parameters:
+        - $ref: "#/components/parameters/CAID"
+        - $ref: "#/components/parameters/IdempotencyKey"
+        - $ref: "#/components/parameters/OperatorID"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [crl]
+              properties:
+                crl:
+                  $ref: "#/components/schemas/CRLSource"
+                noCrlAccepted:
+                  type: boolean
+                  description: crl.source が none のとき、CRL がなく業者の AP の失効が効かないことの了承（必須）
+      responses:
+        "200":
+          description: CA
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CA"
+        "400":
+          $ref: "#/components/responses/Problem"
+        "404":
+          $ref: "#/components/responses/Problem"
+        "409":
+          description: CA_DISABLED、IDEMPOTENCY_CONFLICT
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+        "422":
+          description: CRL_INVALID、CRL_REQUIRED、NO_CRL_NOT_ACCEPTED
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/Problem"
   /certs:
     get:
       summary: 証明書の一覧（新しく発行した順）
@@ -166,6 +345,10 @@ paths:
           schema:
             $ref: "#/components/schemas/Name"
         - name: edge
+          in: query
+          schema:
+            $ref: "#/components/schemas/Name"
+        - name: group
           in: query
           schema:
             $ref: "#/components/schemas/Name"
@@ -225,8 +408,8 @@ paths:
               additionalProperties: false
               required: [profile, tenant, csr]
               description: |
-                ap-client は tenant と ap、probe-client と tenant-server は tenant と edge を与える。
-                署名する CA は、ap-client と probe-client は tenant.<tenant>、tenant-server は server。
+                ap-client は tenant と ap、group-client は tenant と group、probe-client と tenant-server は tenant と edge を与える。
+                署名する CA は、ap-client・group-client・probe-client は tenant.<tenant>、tenant-server は server。
               properties:
                 profile:
                   $ref: "#/components/schemas/Profile"
@@ -235,6 +418,8 @@ paths:
                 ap:
                   $ref: "#/components/schemas/Name"
                 edge:
+                  $ref: "#/components/schemas/Name"
+                group:
                   $ref: "#/components/schemas/Name"
                 csr:
                   type: string
@@ -265,7 +450,7 @@ paths:
               schema:
                 $ref: "#/components/schemas/Problem"
         "422":
-          description: CSR_INVALID、KEY_TYPE_UNSUPPORTED、NAME_RESERVED（ap-client の AP の名前 probe）
+          description: CSR_INVALID、KEY_TYPE_UNSUPPORTED、NAME_RESERVED（AP とグループの名前 probe）
           content:
             application/problem+json:
               schema:
@@ -340,7 +525,7 @@ components:
       name: caId
       in: path
       required: true
-      description: server か tenant.<slug>
+      description: server、tenant.<slug>、brought.<slug>.<名前>
       schema:
         type: string
     Serial:
@@ -363,13 +548,38 @@ components:
       pattern: "^[a-z0-9]([a-z0-9-]{0,30}[a-z0-9])?$"
     Profile:
       type: string
-      enum: [ap-client, probe-client, tenant-server]
+      enum: [ap-client, group-client, probe-client, tenant-server]
+    CRLSource:
+      type: object
+      additionalProperties: false
+      required: [source]
+      description: |
+        持ち込みの CA の CRL の取得先。url は URL（http か https。接続先が内部のアドレスなら断る）、meraki は組織の ID と API キー、
+        upload は PEM の CRL。none は CRL なし。API キーは応答・ログ・監査ログに出さない。
+      properties:
+        source:
+          type: string
+          enum: [url, meraki, upload, none]
+        url:
+          type: string
+        merakiOrgId:
+          type: string
+        merakiApiKey:
+          type: string
+          writeOnly: true
+        pem:
+          type: string
+          writeOnly: true
     CRLInfo:
       type: object
       required: [number, thisUpdate, nextUpdate]
       properties:
         number:
           type: integer
+          description: CA ごとの連番（CRL を置くたびに増える）
+        extNumber:
+          type: string
+          description: 持ち込みの CRL の cRLNumber（10 進の文字列。なければ省く）
         thisUpdate:
           type: string
           format: date-time
@@ -378,13 +588,13 @@ components:
           format: date-time
     CA:
       type: object
-      required: [id, kind, status, subject, notAfter, createdAt, issued]
+      required: [id, kind, status, subject, notAfter, createdAt, issued, fingerprint, selfSigned, hasCrl, crlSource]
       properties:
         id:
           type: string
         kind:
           type: string
-          enum: [server, tenant-client]
+          enum: [server, tenant-client, tenant-brought]
         tenant:
           type: string
         status:
@@ -412,6 +622,54 @@ components:
         issued:
           type: integer
           description: 発行した証明書の数
+        fingerprint:
+          type: string
+          description: CA の証明書の SHA-256（16 進小文字）
+        selfSigned:
+          type: boolean
+          description: 自己署名か（false ならエッジは PartialChain で起点にする）
+        hasCrl:
+          type: boolean
+          description: CRL があるか（false ならエッジはそのテナントを CRLCheck off にする）
+        crlSource:
+          type: string
+          enum: [issued, url, meraki, upload, none]
+        crlUrl:
+          type: string
+        merakiOrgId:
+          type: string
+        merakiKeySet:
+          type: boolean
+          description: Meraki の API キーが設定済みか（キーそのものは返さない）
+        crlState:
+          type: object
+          description: 持ち込みの CA の CRL の取得の状態
+          required: [failures]
+          properties:
+            checkedAt:
+              type: string
+              format: date-time
+            okAt:
+              type: string
+              format: date-time
+            failures:
+              type: integer
+              description: 続けて失敗した回数
+            lastError:
+              type: string
+        crlWarning:
+          type: string
+          description: 持ち込みの CA の CRL の警告（3 回続けて失敗、nextUpdate が近いか過ぎた。なければ省く）
+        tenantOnlyConfirmedBy:
+          type: string
+        tenantOnlyConfirmedAt:
+          type: string
+          format: date-time
+        noCrlAcceptedBy:
+          type: string
+        noCrlAcceptedAt:
+          type: string
+          format: date-time
     Cert:
       type: object
       required: [serial, caId, profile, tenant, cn, notBefore, notAfter, status, pubkeySha256, issuedAt, certificate]
@@ -427,6 +685,8 @@ components:
         ap:
           type: string
         edge:
+          type: string
+        group:
           type: string
         cn:
           type: string
@@ -496,7 +756,8 @@ components:
         cause:
           type: string
           enum: [VALIDATION_ERROR, CSR_INVALID, KEY_TYPE_UNSUPPORTED, NAME_RESERVED, CA_NOT_FOUND, CA_EXISTS, CA_DISABLED,
-            CERT_NOT_FOUND, IDEMPOTENCY_CONFLICT, SYSTEM_FAILURE]
+            CA_FINGERPRINT_IN_USE, CERT_NOT_FOUND, CRL_NOT_FOUND, CRL_INVALID, CRL_REQUIRED, TENANT_ONLY_NOT_CONFIRMED,
+            NO_CRL_NOT_ACCEPTED, IDEMPOTENCY_CONFLICT, SYSTEM_FAILURE]
         invalidParams:
           type: array
           items:

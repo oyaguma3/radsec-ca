@@ -1,5 +1,5 @@
-// Package certs は管理API のサーバー証明書（自己署名）を扱う（設計概要 §9.1）。eapaka-node-provisioner の internal/certs を
-// コピーして手直ししたもの。本CA が発行する証明書とは別のもので、provisioner はフィンガープリントで照合する。
+// Package certs は管理API のサーバー証明書（自己署名）を扱う（設計概要 §9.1）。aka-provisioner の internal/certs を
+// コピーして手直ししたもの。本CA が発行する証明書とは別のもので、aka-provisioner は証明書で照合する。
 // 自己署名証明書の生成と、ファイルからの読み込み（更新されたら読み直す）を行う。
 package certs
 
@@ -194,6 +194,46 @@ func (f *File) GetCertificate(*tls.ClientHelloInfo) (*tls.Certificate, error) {
 	}
 	f.mu.Unlock()
 	return f.cert.Load(), nil
+}
+
+// Reload はファイルをすぐ読み直す（SIGHUP）。読めなければ今の証明書のまま続け、誤りを返す。
+func (f *File) Reload() error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.checkedAt = time.Now()
+	cert, sum, err := f.load()
+	if err != nil {
+		return err
+	}
+	f.cert.Store(cert)
+	f.sum = sum
+	return nil
+}
+
+// Replace は自己署名のサーバー証明書を作り直してファイルを置き換える（動いているサーバーは SIGHUP で読み直す）。
+// 新しい証明書を PEM で返す。1 つずつ rename するので、途中の読み直しは鍵が合わず失敗し、今の証明書のまま続く。
+func Replace(certPath, keyPath string, hosts []string) ([]byte, error) {
+	certPEM, keyPEM, err := SelfSigned("radsec-ca", hosts, selfSignedValidFor)
+	if err != nil {
+		return nil, err
+	}
+	for _, f := range []struct {
+		path string
+		data []byte
+		perm fs.FileMode
+	}{{keyPath, keyPEM, 0o600}, {certPath, certPEM, 0o644}} {
+		tmp := f.path + ".new"
+		if err := os.Remove(tmp); err != nil && !errors.Is(err, fs.ErrNotExist) {
+			return nil, err
+		}
+		if err := writeNew(tmp, f.data, f.perm); err != nil {
+			return nil, err
+		}
+		if err := os.Rename(tmp, f.path); err != nil {
+			return nil, err
+		}
+	}
+	return certPEM, nil
 }
 
 // reloadIfChanged はファイルの内容が変わっていたら読み直す。f.mu を保持して呼ぶ。

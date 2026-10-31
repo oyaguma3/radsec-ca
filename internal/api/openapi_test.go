@@ -17,7 +17,7 @@ func TestOpenAPIRoutes(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer f.Close()
-	pathRe := regexp.MustCompile(`^  (/[^:]*):\s*$`)
+	pathRe := regexp.MustCompile(`^  (/.*):\s*$`)
 	methodRe := regexp.MustCompile(`^    (get|post|put|patch|delete):\s*$`)
 	var spec []string
 	inPaths, cur := false, ""
@@ -46,7 +46,7 @@ func TestOpenAPIRoutes(t *testing.T) {
 	}
 	// 変更の口は Idempotency-Key が必須（OpenAPI でも IdempotencyKey を参照する）。
 	for _, r := range Routes {
-		if r.idempotent != (r.Method == "POST") {
+		if r.idempotent != (r.Method != "GET") {
 			t.Errorf("%s %s: idempotent = %v", r.Method, r.Path, r.idempotent)
 		}
 	}

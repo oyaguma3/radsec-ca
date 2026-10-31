@@ -16,8 +16,8 @@ import (
 // Material は名前の材料（§5.2）。呼び出し側が渡すのはプロファイルとこれだけで、SAN の文字列そのものは渡せない。
 type Material struct {
 	Tenant string
-	// AP は ap-client のときだけ、Edge は probe-client と tenant-server のときだけ。
-	AP, Edge string
+	// AP は ap-client のときだけ、Group は group-client のときだけ、Edge は probe-client と tenant-server のときだけ。
+	AP, Edge, Group string
 }
 
 // plan はプロファイルと名前の材料から決まる、署名する CA と証明書の中身。
@@ -36,27 +36,47 @@ func (s *Service) planFor(profile string, m Material) (plan, error) {
 	if err := names.CheckTenant(m.Tenant); err != nil {
 		return plan{}, newError(CauseValidation, "tenant", "テナントの名前は、%v", err)
 	}
-	needAP := profile == db.ProfileAPClient
-	switch {
-	case needAP && m.Edge != "":
-		return plan{}, newError(CauseValidation, "edge", "ap-client にはエッジを与えません")
-	case !needAP && m.AP != "":
+	switch profile {
+	case db.ProfileAPClient, db.ProfileGroupClient, db.ProfileProbeClient, db.ProfileTenantServer:
+	default:
+		return plan{}, newError(CauseValidation, "profile", "プロファイルは ap-client・group-client・probe-client・tenant-server のどれかにしてください")
+	}
+	if m.Edge != "" && (profile == db.ProfileAPClient || profile == db.ProfileGroupClient) {
+		return plan{}, newError(CauseValidation, "edge", "%s にはエッジを与えません", profile)
+	}
+	if m.AP != "" && profile != db.ProfileAPClient {
 		return plan{}, newError(CauseValidation, "ap", "%s には AP を与えません", profile)
 	}
-	if needAP {
+	if m.Group != "" && profile != db.ProfileGroupClient {
+		return plan{}, newError(CauseValidation, "group", "%s にはグループを与えません", profile)
+	}
+	switch profile {
+	case db.ProfileAPClient:
 		if m.AP == names.ProbeAP {
 			return plan{}, newError(CauseNameReserved, "ap", "AP の名前 %q はヘルスチェック用に予約しています（probe-client を使います）", names.ProbeAP)
 		}
 		if err := names.CheckAP(m.AP); err != nil {
 			return plan{}, newError(CauseValidation, "ap", "AP の名前は、%v", err)
 		}
-	} else if !names.ValidSlug(m.Edge) {
-		return plan{}, newError(CauseValidation, "edge", "エッジの名前は、%v", names.ErrSlug)
+	case db.ProfileGroupClient:
+		if m.Group == names.ProbeAP {
+			return plan{}, newError(CauseNameReserved, "group", "グループの名前 %q はヘルスチェック用に予約しています", names.ProbeAP)
+		}
+		if err := names.CheckGroup(m.Group); err != nil {
+			return plan{}, newError(CauseValidation, "group", "グループの名前は、%v", err)
+		}
+	default:
+		if !names.ValidSlug(m.Edge) {
+			return plan{}, newError(CauseValidation, "edge", "エッジの名前は、%v", names.ErrSlug)
+		}
 	}
 	switch profile {
 	case db.ProfileAPClient:
 		return plan{caID: signer.TenantCAID(m.Tenant), cn: names.NASIdentifier(m.Tenant, m.AP),
 			uri: names.SANURI(s.URNPrefix, m.Tenant, m.AP), eku: x509.ExtKeyUsageClientAuth, days: s.APCertDays, tenant: m.Tenant}, nil
+	case db.ProfileGroupClient:
+		return plan{caID: signer.TenantCAID(m.Tenant), cn: names.NASIdentifier(m.Tenant, m.Group),
+			uri: names.GroupSANURI(s.URNPrefix, m.Tenant, m.Group), eku: x509.ExtKeyUsageClientAuth, days: s.GroupCertDays, tenant: m.Tenant}, nil
 	case db.ProfileProbeClient:
 		return plan{caID: signer.TenantCAID(m.Tenant), cn: names.NASIdentifier(m.Tenant, names.ProbeAP),
 			uri: names.SANURI(s.URNPrefix, m.Tenant, names.ProbeAP), eku: x509.ExtKeyUsageClientAuth, days: s.APCertDays, tenant: m.Tenant}, nil
@@ -64,7 +84,7 @@ func (s *Service) planFor(profile string, m Material) (plan, error) {
 		return plan{caID: signer.ServerCAID, cn: m.Tenant + " server " + m.Edge, dns: names.SlotNames(m.Tenant, s.DNSDomain),
 			eku: x509.ExtKeyUsageServerAuth, days: s.ServerCertDays, tenant: m.Tenant}, nil
 	}
-	return plan{}, newError(CauseValidation, "profile", "プロファイルは ap-client・probe-client・tenant-server のどれかにしてください")
+	return plan{}, newError(CauseValidation, "profile", "プロファイルは ap-client・group-client・probe-client・tenant-server のどれかにしてください")
 }
 
 // template は証明書のひな形を作る。有効期限は CA の期限を超えない。NotBefore は時計のずれを見込んで 5 分前（§5.2）。

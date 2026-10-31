@@ -139,3 +139,42 @@ func TestFileReload(t *testing.T) {
 		t.Errorf("GetCertificate after interval: DNSNames = %v", cert.Leaf.DNSNames)
 	}
 }
+
+func TestReplaceAndReload(t *testing.T) {
+	dir := t.TempDir()
+	certPath, keyPath := filepath.Join(dir, "server.pem"), filepath.Join(dir, "server.key")
+	if _, err := EnsureFiles(certPath, keyPath, []string{"radsec-ca"}); err != nil {
+		t.Fatal(err)
+	}
+	f, err := LoadFile(certPath, keyPath, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	before := Fingerprint(f.Leaf())
+	if _, err := Replace(certPath, keyPath, []string{"radsec-ca", "ca.example.net"}); err != nil {
+		t.Fatal(err)
+	}
+	if Fingerprint(f.Leaf()) != before {
+		t.Error("replaced without reload")
+	}
+	if err := f.Reload(); err != nil {
+		t.Fatal(err)
+	}
+	if Fingerprint(f.Leaf()) == before || len(f.Leaf().DNSNames) != 2 {
+		t.Errorf("after reload: %v", f.Leaf().DNSNames)
+	}
+	if info, err := os.Stat(keyPath); err != nil || info.Mode().Perm() != 0o600 {
+		t.Errorf("key file: %v %v", info, err)
+	}
+	// 壊れたファイルでは今の証明書のまま続け、誤りを返す。
+	cur := Fingerprint(f.Leaf())
+	if err := os.WriteFile(certPath, []byte("broken"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Reload(); err == nil {
+		t.Error("broken file reloaded")
+	}
+	if Fingerprint(f.Leaf()) != cur {
+		t.Error("the certificate changed")
+	}
+}

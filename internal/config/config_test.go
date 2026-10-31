@@ -1,6 +1,8 @@
 package config
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -33,26 +35,53 @@ func TestLoadDefaults(t *testing.T) {
 	}
 }
 
-func TestAdminClients(t *testing.T) {
+func TestAdminClientsFile(t *testing.T) {
 	setBase(t)
-	fp := strings.Repeat("ab", 32)
-	t.Setenv("CA_ADMIN_CLIENTS", "provisioner="+strings.ToUpper(fp))
-	t.Setenv("CA_TLS_HOSTS", "100.64.0.10, ca.example.net")
+	file := filepath.Join(t.TempDir(), "admin-clients")
+	t.Setenv("CA_ADMIN_CLIENTS_FILE", file)
+	// ファイルがなければ管理API を待ち受けない（単独モード）。
 	c, err := Load()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if c.AdminClients[fp] != "provisioner" || len(c.TLSHosts) != 2 || !c.APIEnabled() {
-		t.Errorf("admin: %+v %v", c.AdminClients, c.TLSHosts)
+	if c.APIEnabled() {
+		t.Error("API enabled without the file")
+	}
+	if err := os.WriteFile(file, []byte("provisioner="+strings.Repeat("ab", 32)+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("CA_TLS_HOSTS", "100.64.0.10, ca.example.net")
+	if c, err = Load(); err != nil {
+		t.Fatal(err)
+	}
+	if !c.APIEnabled() || len(c.TLSHosts) != 2 {
+		t.Errorf("admin: %v %v", c.APIEnabled(), c.TLSHosts)
 	}
 	t.Setenv("CA_TLS_HOSTS", "")
 	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "CA_TLS_HOSTS") {
 		t.Errorf("no TLS hosts: %v", err)
 	}
-	for _, bad := range []string{"provisioner", "p=short", "bad name=" + fp, "a=" + fp + ",b=" + fp} {
-		if _, err := ParseAdminClients(bad); err == nil {
-			t.Errorf("ParseAdminClients(%q) = nil", bad)
-		}
+	// 環境変数の古い設定は黙って無視せず、誤りにする。
+	t.Setenv("CA_TLS_HOSTS", "ca.example.net")
+	t.Setenv("CA_ADMIN_CLIENTS", "provisioner="+strings.Repeat("ab", 32))
+	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "CA_ADMIN_CLIENTS is no longer used") {
+		t.Errorf("old setting: %v", err)
+	}
+}
+
+func TestBroughtSettings(t *testing.T) {
+	setBase(t)
+	c, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.BroughtCRLRefresh != time.Hour || c.BroughtCRLTimeout != 20*time.Second || c.BroughtCRLAllowPrivate ||
+		c.MerakiAPIBase != "https://api.meraki.com/api/v1" || c.GroupCertDays != 730 || c.AuditDir != "/data/audit" || c.AuditRetentionDays != 14 {
+		t.Errorf("defaults: %+v", c)
+	}
+	t.Setenv("CA_BROUGHT_CRL_TIMEOUT", "26s")
+	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "CA_BROUGHT_CRL_TIMEOUT") {
+		t.Errorf("timeout: %v", err)
 	}
 }
 

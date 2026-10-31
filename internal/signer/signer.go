@@ -40,6 +40,9 @@ const ServerCAID = "server"
 // TenantCAID はテナント slug のクライアントCA の ID。
 func TenantCAID(slug string) string { return "tenant." + slug }
 
+// BroughtCAID はテナント slug の持ち込みの CA の ID（brought.<slug>.<名前>。§19.2）。
+func BroughtCAID(slug, name string) string { return "brought." + slug + "." + name }
+
 // ParseCAID は CA の ID を読み、種類とテナントを返す。
 func ParseCAID(id string) (kind, tenant string, err error) {
 	if id == ServerCAID {
@@ -47,6 +50,12 @@ func ParseCAID(id string) (kind, tenant string, err error) {
 	}
 	if slug, ok := strings.CutPrefix(id, "tenant."); ok && names.ValidSlug(slug) {
 		return db.KindTenantClient, slug, nil
+	}
+	// slug と名前に . は入らないので、一意に読める。
+	if rest, ok := strings.CutPrefix(id, "brought."); ok {
+		if slug, name, ok := strings.Cut(rest, "."); ok && names.ValidSlug(slug) && names.ValidSlug(name) {
+			return db.KindTenantBrought, slug, nil
+		}
 	}
 	return "", "", fmt.Errorf("invalid CA id %q", id)
 }
@@ -124,7 +133,7 @@ func (l *Local) CreateCA(ctx context.Context, id string, subject pkix.Name, vali
 		return nil, err
 	}
 	err = l.DB.InsertCA(ctx, db.CA{ID: id, Kind: kind, Tenant: tenant, CertDER: der, KeyEnc: enc, KeyNonce: nonce,
-		KEKID: l.KEK.ID(), Status: db.StatusActive, NotAfter: cert.NotAfter, CreatedAt: now})
+		KEKID: l.KEK.ID(), Status: db.StatusActive, NotAfter: cert.NotAfter, CreatedAt: now, SelfSigned: true})
 	if err != nil {
 		return nil, err
 	}
@@ -190,6 +199,24 @@ func (l *Local) CreateCRL(ctx context.Context, caID string, tmpl *x509.Revocatio
 	return der, nil
 }
 
+// merakiKeyAAD は Meraki の API キーの AAD（暗号文を別の CA の行や別の用途に移しても復号できない。§19.5）。
+func merakiKeyAAD(caID string) string { return caID + "/meraki-key" }
+
+// SealMerakiKey は持ち込みの CA の Meraki の API キーを暗号化する。
+func (l *Local) SealMerakiKey(caID, key string) (enc, nonce []byte, kekID string, err error) {
+	enc, nonce, err = l.KEK.Seal([]byte(key), merakiKeyAAD(caID))
+	return enc, nonce, l.KEK.ID(), err
+}
+
+// OpenMerakiKey は持ち込みの CA の Meraki の API キーを復号する。
+func (l *Local) OpenMerakiKey(c db.CA) (string, error) {
+	plain, err := l.KEK.Open(c.MerakiKeyEnc, c.MerakiKeyNonce, merakiKeyAAD(c.ID))
+	if err != nil {
+		return "", fmt.Errorf("CA %s: Meraki API key: %w", c.ID, err)
+	}
+	return string(plain), nil
+}
+
 // ErrKEKMismatch は、KEK が DB の記録と合わないことを表す（起動しない。§6.2）。
 var ErrKEKMismatch = errors.New("the KEK does not match the database")
 
@@ -215,6 +242,15 @@ func (l *Local) Check(ctx context.Context) (int, error) {
 		return 0, fmt.Errorf("%w: the database expects KEK %s but the file is KEK %s", ErrKEKMismatch, id, l.KEK.ID())
 	}
 	for _, c := range cas {
+		// 持ち込みの CA には鍵がない。Meraki の API キーがあれば復号できることを確かめる。
+		if c.Kind == db.KindTenantBrought {
+			if len(c.MerakiKeyEnc) > 0 {
+				if _, err := l.OpenMerakiKey(c); err != nil {
+					return 0, fmt.Errorf("%w: %v", ErrKEKMismatch, err)
+				}
+			}
+			continue
+		}
 		cert, key, err := l.decode(c)
 		if err != nil {
 			return 0, fmt.Errorf("%w: %v", ErrKEKMismatch, err)
@@ -227,7 +263,7 @@ func (l *Local) Check(ctx context.Context) (int, error) {
 	return len(cas), nil
 }
 
-// Rekey は、すべての CA の鍵を新しい KEK で暗号化し直し、KEK の識別子を書き換える（1 つのトランザクション。§6.3）。
+// Rekey は、すべての CA の鍵と Meraki の API キーを新しい KEK で暗号化し直し、KEK の識別子を書き換える（1 つのトランザクション。§6.3）。
 // 本CA を止めてから行う。入れ替えた CA の数を返す。
 func (l *Local) Rekey(ctx context.Context, next *kek.KEK) (int, error) {
 	if _, err := l.Check(ctx); err != nil {
@@ -239,6 +275,24 @@ func (l *Local) Rekey(ctx context.Context, next *kek.KEK) (int, error) {
 	}
 	err = l.DB.Tx(ctx, func(tx *sql.Tx) error {
 		for _, c := range cas {
+			if c.Kind == db.KindTenantBrought {
+				if len(c.MerakiKeyEnc) == 0 {
+					continue
+				}
+				plain, err := l.KEK.Open(c.MerakiKeyEnc, c.MerakiKeyNonce, merakiKeyAAD(c.ID))
+				if err != nil {
+					return fmt.Errorf("CA %s: Meraki API key: %w", c.ID, err)
+				}
+				enc, nonce, err := next.Seal(plain, merakiKeyAAD(c.ID))
+				clear(plain)
+				if err != nil {
+					return err
+				}
+				if err := db.RekeyMerakiKey(ctx, tx, c.ID, enc, nonce, next.ID()); err != nil {
+					return err
+				}
+				continue
+			}
 			plain, err := l.KEK.Open(c.KeyEnc, c.KeyNonce, c.ID)
 			if err != nil {
 				return fmt.Errorf("CA %s: %w", c.ID, err)

@@ -32,7 +32,15 @@ type AuditEntry struct {
 	TraceID string
 }
 
-// InsertAudit は監査ログを 1 件書き込む。
+// AuditSink は監査ログの写しの書き先（日ごとのファイル。internal/audit）。
+type AuditSink interface {
+	Append(AuditEntry) error
+}
+
+// SetAuditSink は監査ログの写しの書き先を設定する。
+func (d *DB) SetAuditSink(s AuditSink) { d.auditSink = s }
+
+// InsertAudit は監査ログを 1 件書き込み、写しの書き先があれば同じ内容を書く（DB に書けたら、写しの誤りだけを返す）。
 func (d *DB) InsertAudit(ctx context.Context, e AuditEntry) error {
 	detail := []byte("{}")
 	if len(e.Detail) > 0 {
@@ -45,10 +53,16 @@ func (d *DB) InsertAudit(ctx context.Context, e AuditEntry) error {
 	if e.Result == "" {
 		e.Result = "ok"
 	}
+	e.Time = d.now()
 	_, err := d.sql.ExecContext(ctx, `INSERT INTO audit (time, operator, mgmt_client, source, action, target, trace_id, result, details)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`, millis(d.now()), e.Operator, e.MgmtClient, e.Source, e.Action, e.Target, e.TraceID, e.Result, string(detail))
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`, millis(e.Time), e.Operator, e.MgmtClient, e.Source, e.Action, e.Target, e.TraceID, e.Result, string(detail))
 	if err != nil {
 		return fmt.Errorf("insert audit: %w", err)
+	}
+	if d.auditSink != nil {
+		if err := d.auditSink.Append(e); err != nil {
+			return fmt.Errorf("append audit file: %w", err)
+		}
 	}
 	return nil
 }

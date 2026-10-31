@@ -5,6 +5,7 @@ import (
 	"cmp"
 	"errors"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"net"
 	"net/netip"
@@ -33,8 +34,10 @@ type Config struct {
 	// TLSDir は管理API のサーバー証明書と鍵を置くディレクトリ（DB と同じディレクトリの tls）。
 	TLSDir string
 
-	// AdminClients は管理クライアントのフィンガープリント（SHA-256、16 進小文字）から識別名を引く。空なら API を待ち受けない。
-	AdminClients map[string]string
+	// AdminClientsFile は管理クライアントのピンのファイル（SIGHUP で読み直す）。ファイルがなければ API を待ち受けない（単独モード）。
+	AdminClientsFile string
+	// adminClientsFound はピンのファイルがあったか。
+	adminClientsFound bool
 	// TLSHosts は管理API のサーバー証明書の SAN。
 	TLSHosts []string
 
@@ -48,23 +51,31 @@ type Config struct {
 	// DevUserEmail は開発用の設定（JWT を検証せず、この利用者として動かす。画面がループバックで待ち受けるときだけ）。
 	DevUserEmail string
 
-	// APCertDays と ServerCertDays は有効期限（日。§5.2）。
-	APCertDays, ServerCertDays int
+	// APCertDays・GroupCertDays・ServerCertDays は有効期限（日。§5.2、§19.4）。
+	APCertDays, GroupCertDays, ServerCertDays int
 	// CRLValidity と CRLRefresh は CRL の nextUpdate までの長さと作り直しの間隔（§7.2）。
 	CRLValidity, CRLRefresh time.Duration
+	// BroughtCRLRefresh と BroughtCRLTimeout は持ち込みの CA の CRL を取りに行く間隔と 1 回の上限（§19.3）。
+	BroughtCRLRefresh, BroughtCRLTimeout time.Duration
+	// BroughtCRLAllowPrivate は CRL の取得先に内部のアドレスを許す（試験用。§19.3）。
+	BroughtCRLAllowPrivate bool
+	// MerakiAPIBase は Meraki の Dashboard API の入口（§19.3）。
+	MerakiAPIBase string
+
+	// AuditDir は監査ログの日ごとのファイルを置くディレクトリ、AuditRetentionDays は保存の日数（§13）。
+	AuditDir           string
+	AuditRetentionDays int
 }
 
 // DevMode は開発用の設定で動くか。
 func (c Config) DevMode() bool { return c.DevUserEmail != "" }
 
 // APIEnabled は管理API を待ち受けるか。
-func (c Config) APIEnabled() bool { return len(c.AdminClients) > 0 }
+func (c Config) APIEnabled() bool { return c.adminClientsFound }
 
 var (
-	clientNamePattern  = regexp.MustCompile(`^[A-Za-z0-9._-]{1,64}$`)
-	fingerprintPattern = regexp.MustCompile(`^[0-9a-f]{64}$`)
-	hostnamePattern    = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*$`)
-	emailPattern       = regexp.MustCompile(`^[a-z0-9._-]+@[a-z0-9._-]+$`)
+	hostnamePattern = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*$`)
+	emailPattern    = regexp.MustCompile(`^[a-z0-9._-]+@[a-z0-9._-]+$`)
 )
 
 // ValidEmail は利用者のメールアドレスの形か（監査ログの操作者に使う。provisioner の X-Operator-Id と同じ文字）。
@@ -89,14 +100,15 @@ func CheckOrg(s string) error {
 // Load は環境変数から設定を読む。誤りはまとめて返す。
 func Load() (Config, error) {
 	c := Config{
-		Org:         os.Getenv("CA_ORG"),
-		URNPrefix:   os.Getenv("CA_URN_PREFIX"),
-		DNSDomain:   strings.ToLower(os.Getenv("CA_DNS_DOMAIN")),
-		DBPath:      cmp.Or(os.Getenv("CA_DB_PATH"), "/data/radsec-ca.db"),
-		KEKFile:     cmp.Or(os.Getenv("CA_KEK_FILE"), "/run/secrets/kek"),
-		APIAddr:     cmp.Or(os.Getenv("CA_API_ADDR"), ":9448"),
-		PublishAddr: cmp.Or(os.Getenv("CA_PUBLISH_ADDR"), ":8449"),
-		GUIAddr:     cmp.Or(os.Getenv("CA_GUI_ADDR"), ":8448"),
+		Org:           os.Getenv("CA_ORG"),
+		URNPrefix:     os.Getenv("CA_URN_PREFIX"),
+		DNSDomain:     strings.ToLower(os.Getenv("CA_DNS_DOMAIN")),
+		DBPath:        cmp.Or(os.Getenv("CA_DB_PATH"), "/data/radsec-ca.db"),
+		KEKFile:       cmp.Or(os.Getenv("CA_KEK_FILE"), "/run/secrets/kek"),
+		APIAddr:       cmp.Or(os.Getenv("CA_API_ADDR"), ":9448"),
+		PublishAddr:   cmp.Or(os.Getenv("CA_PUBLISH_ADDR"), ":8449"),
+		GUIAddr:       cmp.Or(os.Getenv("CA_GUI_ADDR"), ":8448"),
+		MerakiAPIBase: strings.TrimRight(cmp.Or(os.Getenv("CA_MERAKI_API_BASE"), "https://api.meraki.com/api/v1"), "/"),
 	}
 	var errs []error
 	if v := os.Getenv("LOG_LEVEL"); v != "" {
@@ -113,7 +125,9 @@ func Load() (Config, error) {
 	if err := names.CheckDomain(c.DNSDomain); err != nil {
 		errs = append(errs, fmt.Errorf("CA_DNS_DOMAIN: %w", err))
 	}
-	for name, p := range map[string]string{"CA_DB_PATH": c.DBPath, "CA_KEK_FILE": c.KEKFile} {
+	c.AdminClientsFile = cmp.Or(os.Getenv("CA_ADMIN_CLIENTS_FILE"), "/run/secrets/admin-clients")
+	c.AuditDir = cmp.Or(os.Getenv("CA_AUDIT_DIR"), filepath.Join(filepath.Dir(c.DBPath), "audit"))
+	for name, p := range map[string]string{"CA_DB_PATH": c.DBPath, "CA_KEK_FILE": c.KEKFile, "CA_ADMIN_CLIENTS_FILE": c.AdminClientsFile, "CA_AUDIT_DIR": c.AuditDir} {
 		if !filepath.IsAbs(p) {
 			errs = append(errs, fmt.Errorf("%s: must be an absolute path", name))
 		}
@@ -133,11 +147,14 @@ func Load() (Config, error) {
 // loadAdmin は管理クライアントとサーバー証明書の SAN を読む。
 func (c *Config) loadAdmin() []error {
 	var errs []error
-	clients, err := ParseAdminClients(os.Getenv("CA_ADMIN_CLIENTS"))
-	if err != nil {
-		errs = append(errs, fmt.Errorf("CA_ADMIN_CLIENTS: %w", err))
+	if v := os.Getenv("CA_ADMIN_CLIENTS"); v != "" {
+		errs = append(errs, errors.New("CA_ADMIN_CLIENTS is no longer used: write the admin clients to the file CA_ADMIN_CLIENTS_FILE (one <name>=<fingerprint> per line)"))
 	}
-	c.AdminClients = clients
+	if _, err := os.Stat(c.AdminClientsFile); err == nil {
+		c.adminClientsFound = true
+	} else if !errors.Is(err, fs.ErrNotExist) {
+		errs = append(errs, fmt.Errorf("CA_ADMIN_CLIENTS_FILE: %w", err))
+	}
 	for h := range strings.SplitSeq(os.Getenv("CA_TLS_HOSTS"), ",") {
 		h = strings.ToLower(strings.TrimSpace(h))
 		if h == "" {
@@ -150,39 +167,20 @@ func (c *Config) loadAdmin() []error {
 		c.TLSHosts = append(c.TLSHosts, h)
 	}
 	if c.APIEnabled() && len(c.TLSHosts) == 0 {
-		errs = append(errs, errors.New("CA_TLS_HOSTS is required when CA_ADMIN_CLIENTS is set (the SAN of the API server certificate, e.g. the tunnel address)"))
+		errs = append(errs, errors.New("CA_TLS_HOSTS is required when the admin clients file exists (the SAN of the API server certificate, e.g. the name or address aka-provisioner connects to)"))
 	}
 	return errs
 }
 
-// ParseAdminClients は「識別名=フィンガープリント,...」を読む（provisioner の PROVISIONER_ADMIN_CLIENTS と同じ形）。
-func ParseAdminClients(s string) (map[string]string, error) {
-	out := map[string]string{}
-	names := map[string]bool{}
-	for entry := range strings.SplitSeq(s, ",") {
-		entry = strings.TrimSpace(entry)
-		if entry == "" {
-			continue
-		}
-		name, fp, ok := strings.Cut(entry, "=")
-		fp = strings.ToLower(strings.ReplaceAll(strings.TrimSpace(fp), ":", ""))
-		name = strings.TrimSpace(name)
-		switch {
-		case !ok || !clientNamePattern.MatchString(name):
-			return nil, fmt.Errorf("%q: must be name=fingerprint (name: letters, digits and ._- up to 64 characters)", entry)
-		case !fingerprintPattern.MatchString(fp):
-			return nil, fmt.Errorf("%q: the fingerprint must be the SHA-256 of the certificate in hexadecimal (64 characters)", entry)
-		case names[name] || out[fp] != "":
-			return nil, fmt.Errorf("%q: duplicate name or fingerprint", entry)
-		}
-		names[name] = true
-		out[fp] = name
-	}
-	return out, nil
-}
-
 func (c *Config) loadValidity() []error {
 	var errs []error
+	if v := os.Getenv("CA_BROUGHT_CRL_ALLOW_PRIVATE"); v != "" {
+		b, err := strconv.ParseBool(v)
+		if err != nil {
+			errs = append(errs, errors.New("CA_BROUGHT_CRL_ALLOW_PRIVATE: must be true or false"))
+		}
+		c.BroughtCRLAllowPrivate = b
+	}
 	for _, d := range []struct {
 		env      string
 		dst      *int
@@ -190,6 +188,8 @@ func (c *Config) loadValidity() []error {
 		min, max int
 	}{
 		{"CA_AP_CERT_DAYS", &c.APCertDays, 730, 1, 3650},
+		{"CA_GROUP_CERT_DAYS", &c.GroupCertDays, 730, 1, 3650},
+		{"CA_AUDIT_RETENTION_DAYS", &c.AuditRetentionDays, 14, 1, 3650},
 		{"CA_SERVER_CERT_DAYS", &c.ServerCertDays, 365, 1, 3650},
 	} {
 		*d.dst = d.def
@@ -210,6 +210,9 @@ func (c *Config) loadValidity() []error {
 	}{
 		{"CA_CRL_VALIDITY", &c.CRLValidity, 7 * 24 * time.Hour, time.Hour, 90 * 24 * time.Hour},
 		{"CA_CRL_REFRESH", &c.CRLRefresh, 24 * time.Hour, time.Minute, 30 * 24 * time.Hour},
+		{"CA_BROUGHT_CRL_REFRESH", &c.BroughtCRLRefresh, time.Hour, time.Minute, 24 * time.Hour},
+		// aka-provisioner の中継のタイムアウト（ca は 30 秒）より短くする。
+		{"CA_BROUGHT_CRL_TIMEOUT", &c.BroughtCRLTimeout, 20 * time.Second, time.Second, 25 * time.Second},
 	} {
 		*d.dst = d.def
 		if v := os.Getenv(d.env); v != "" {

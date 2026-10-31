@@ -14,6 +14,7 @@ const (
 	ProfileAPClient     = "ap-client"
 	ProfileProbeClient  = "probe-client"
 	ProfileTenantServer = "tenant-server"
+	ProfileGroupClient  = "group-client"
 )
 
 // Cert は発行した証明書の記録。
@@ -24,6 +25,7 @@ type Cert struct {
 	Tenant       string
 	AP           string
 	Edge         string
+	Group        string
 	CN           string
 	SANDNS       []string
 	SANURI       string
@@ -49,14 +51,14 @@ func (c Cert) Status(now time.Time) string {
 	return "valid"
 }
 
-const certColumns = `serial, ca_id, profile, tenant, ap, edge, cn, san_dns, san_uri, not_before, not_after, cert_der, pubkey_sha256,
+const certColumns = `serial, ca_id, profile, tenant, ap, edge, grp, cn, san_dns, san_uri, not_before, not_after, cert_der, pubkey_sha256,
 	revoked_at, revoke_reason, issued_by, trace_id, created_at`
 
 func scanCert(s interface{ Scan(...any) error }) (Cert, error) {
 	var c Cert
 	var dns string
 	var nb, na, ra, ca int64
-	if err := s.Scan(&c.Serial, &c.CAID, &c.Profile, &c.Tenant, &c.AP, &c.Edge, &c.CN, &dns, &c.SANURI, &nb, &na, &c.CertDER,
+	if err := s.Scan(&c.Serial, &c.CAID, &c.Profile, &c.Tenant, &c.AP, &c.Edge, &c.Group, &c.CN, &dns, &c.SANURI, &nb, &na, &c.CertDER,
 		&c.PubKeySHA256, &ra, &c.RevokeReason, &c.IssuedBy, &c.TraceID, &ca); err != nil {
 		return Cert{}, err
 	}
@@ -69,8 +71,8 @@ func scanCert(s interface{ Scan(...any) error }) (Cert, error) {
 
 // InsertCert は発行した証明書を記録する。シリアル番号が重なれば ErrConflict。
 func (d *DB) InsertCert(ctx context.Context, c Cert) error {
-	_, err := d.sql.ExecContext(ctx, "INSERT INTO certs ("+certColumns+") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-		c.Serial, c.CAID, c.Profile, c.Tenant, c.AP, c.Edge, c.CN, strings.Join(c.SANDNS, ","), c.SANURI,
+	_, err := d.sql.ExecContext(ctx, "INSERT INTO certs ("+certColumns+") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+		c.Serial, c.CAID, c.Profile, c.Tenant, c.AP, c.Edge, c.Group, c.CN, strings.Join(c.SANDNS, ","), c.SANURI,
 		millis(c.NotBefore), millis(c.NotAfter), c.CertDER, c.PubKeySHA256, millis(c.RevokedAt), c.RevokeReason,
 		c.IssuedBy, c.TraceID, millis(c.CreatedAt))
 	if isUnique(err) {
@@ -105,7 +107,7 @@ func (d *DB) Cert(ctx context.Context, serial string) (Cert, error) {
 
 // CertFilter は証明書の一覧の絞り込み。空の項目は絞り込まない。
 type CertFilter struct {
-	CAID, Tenant, Profile, AP, Edge string
+	CAID, Tenant, Profile, AP, Edge, Group string
 	// Status は valid / revoked / expired。
 	Status string
 	// ExpiresBefore が非ゼロなら、その時刻より前に期限が切れるもの（失効したものを除く）。
@@ -130,7 +132,7 @@ func (d *DB) Certs(ctx context.Context, f CertFilter) (CertPage, error) {
 		args = append(args, v...)
 	}
 	now := millis(d.now())
-	for _, c := range []struct{ col, v string }{{"ca_id", f.CAID}, {"tenant", f.Tenant}, {"profile", f.Profile}, {"ap", f.AP}, {"edge", f.Edge}} {
+	for _, c := range []struct{ col, v string }{{"ca_id", f.CAID}, {"tenant", f.Tenant}, {"profile", f.Profile}, {"ap", f.AP}, {"edge", f.Edge}, {"grp", f.Group}} {
 		if c.v != "" {
 			add(c.col+" = ?", c.v)
 		}
@@ -174,7 +176,7 @@ func (d *DB) Certs(ctx context.Context, f CertFilter) (CertPage, error) {
 		var c Cert
 		var dns string
 		var nb, na, ra, ca int64
-		if err := rows.Scan(&id, &c.Serial, &c.CAID, &c.Profile, &c.Tenant, &c.AP, &c.Edge, &c.CN, &dns, &c.SANURI, &nb, &na, &c.CertDER,
+		if err := rows.Scan(&id, &c.Serial, &c.CAID, &c.Profile, &c.Tenant, &c.AP, &c.Edge, &c.Group, &c.CN, &dns, &c.SANURI, &nb, &na, &c.CertDER,
 			&c.PubKeySHA256, &ra, &c.RevokeReason, &c.IssuedBy, &c.TraceID, &ca); err != nil {
 			return CertPage{}, fmt.Errorf("list certs: %w", err)
 		}

@@ -11,6 +11,7 @@ import (
 
 	"github.com/oyaguma3/radsec-ca/internal/ca"
 	"github.com/oyaguma3/radsec-ca/internal/ca/catest"
+	"github.com/oyaguma3/radsec-ca/internal/db"
 )
 
 func TestPublish(t *testing.T) {
@@ -79,5 +80,76 @@ func TestPublish(t *testing.T) {
 		if resp, _ := get(p, ""); resp.StatusCode != 404 {
 			t.Errorf("%s: %d", p, resp.StatusCode)
 		}
+	}
+}
+
+func TestBroughtCRL(t *testing.T) {
+	svc, d := catest.New(t)
+	ctx := t.Context()
+	root := catest.NewVendorCA(t, "root")
+	v := catest.NewIntermediateCA(t, root, "vendor")
+	c, err := svc.RegisterBrought(ctx, ca.System, ca.BroughtRequest{Tenant: "tenant-a", Name: "v", CertPEM: v.PEM, TenantOnlyConfirmed: true,
+		CRL: ca.CRLSource{Source: db.CRLSourceUpload, PEM: catest.CRLPEM(v.CRL(t, catest.CRLOptions{Number: 9}))}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := &Handler{Log: slog.New(slog.NewTextHandler(io.Discard, nil)), DB: d}
+	srv := httptest.NewServer(h.Routes())
+	defer srv.Close()
+	get := func(path string, hdr ...string) (*http.Response, []byte) {
+		t.Helper()
+		req, _ := http.NewRequest(http.MethodGet, srv.URL+path, nil)
+		if len(hdr) == 2 {
+			req.Header.Set(hdr[0], hdr[1])
+		}
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		b, _ := io.ReadAll(resp.Body)
+		return resp, b
+	}
+	resp, body := get("/crl/" + c.ID + ".pem")
+	block, _ := pem.Decode(body)
+	if resp.StatusCode != 200 || block == nil {
+		t.Fatalf("crl: %d %s", resp.StatusCode, body)
+	}
+	// 署名し直さず、受け取ったものをそのまま配る。
+	rl, err := x509.ParseRevocationList(block.Bytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := rl.CheckSignatureFrom(v.Cert); err != nil {
+		t.Errorf("signature: %v", err)
+	}
+	etag := resp.Header.Get("ETag")
+	if r, _ := get("/crl/"+c.ID+".pem", "If-None-Match", etag); r.StatusCode != 304 {
+		t.Errorf("If-None-Match: %d", r.StatusCode)
+	}
+	if err := svc.UploadCRL(ctx, ca.System, c.ID, v.CRL(t, catest.CRLOptions{Number: 10})); err != nil {
+		t.Fatal(err)
+	}
+	if r, _ := get("/crl/"+c.ID+".pem", "If-None-Match", etag); r.StatusCode != 200 {
+		t.Errorf("after update: %d", r.StatusCode)
+	}
+	if r, _ := get("/crl/" + c.ID + ".der"); r.StatusCode != 200 || r.Header.Get("Content-Type") != "application/pkix-crl" {
+		t.Errorf("der: %d", r.StatusCode)
+	}
+	if r, b := get("/ca/" + c.ID + ".pem"); r.StatusCode != 200 || string(b) != string(v.PEM) {
+		t.Errorf("ca: %d", r.StatusCode)
+	}
+	// 取得先が none なら配らない（CA の証明書は配る）。
+	if _, err := svc.ChangeCRLSource(ctx, ca.System, c.ID, ca.CRLSource{Source: db.CRLSourceNone}, true); err != nil {
+		t.Fatal(err)
+	}
+	if r, _ := get("/crl/" + c.ID + ".pem"); r.StatusCode != 404 {
+		t.Errorf("crl of none: %d", r.StatusCode)
+	}
+	if r, _ := get("/ca/" + c.ID + ".pem"); r.StatusCode != 200 {
+		t.Errorf("ca of none: %d", r.StatusCode)
+	}
+	if r, _ := get("/crl/brought.tenant-a.pem"); r.StatusCode != 404 {
+		t.Errorf("bad id: %d", r.StatusCode)
 	}
 }
