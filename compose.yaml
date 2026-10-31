@@ -1,4 +1,5 @@
 # 本CA の配備（設計概要 §4）。本CA と cloudflared。運用ガイド（docs/operations.md）の手順で導入する。
+# この土台は単独モードの形。管理モードでは compose.managed.yaml を重ねる。
 name: radsec-ca
 
 services:
@@ -21,7 +22,9 @@ services:
       CA_DNS_DOMAIN: ${CA_DNS_DOMAIN:?.env に CA_DNS_DOMAIN を設定してください}
       CA_DB_PATH: /data/radsec-ca.db
       CA_KEK_FILE: /run/secrets/kek
-      CA_ADMIN_CLIENTS: ${CA_ADMIN_CLIENTS:-}
+      # 管理クライアントのピンのファイル。ファイルがなければ管理API を待ち受けない（単独モード）。
+      # 管理モードでは compose.managed.yaml を重ねて、secrets で渡す。
+      CA_ADMIN_CLIENTS_FILE: /run/secrets/admin-clients
       CA_TLS_HOSTS: ${CA_TLS_HOSTS:-}
       CA_API_ADDR: ":9448"
       CA_PUBLISH_ADDR: ":8449"
@@ -31,15 +34,23 @@ services:
       CA_ACCESS_AUD: ${CA_ACCESS_AUD:?.env に CA_ACCESS_AUD を設定してください}
       CA_INITIAL_ADMIN_EMAIL: ${CA_INITIAL_ADMIN_EMAIL:?.env に CA_INITIAL_ADMIN_EMAIL を設定してください}
       CA_AP_CERT_DAYS: ${CA_AP_CERT_DAYS:-730}
+      CA_GROUP_CERT_DAYS: ${CA_GROUP_CERT_DAYS:-730}
       CA_SERVER_CERT_DAYS: ${CA_SERVER_CERT_DAYS:-365}
       CA_CRL_VALIDITY: ${CA_CRL_VALIDITY:-168h}
       CA_CRL_REFRESH: ${CA_CRL_REFRESH:-24h}
+      # 持ち込みの CA の CRL を取りに行く間隔と 1 回の上限（設計概要 §19.3）。
+      CA_BROUGHT_CRL_REFRESH: ${CA_BROUGHT_CRL_REFRESH:-1h}
+      CA_BROUGHT_CRL_TIMEOUT: ${CA_BROUGHT_CRL_TIMEOUT:-20s}
+      CA_MERAKI_API_BASE: ${CA_MERAKI_API_BASE:-https://api.meraki.com/api/v1}
+      # 監査ログの日ごとのファイル（設計概要 §13）。
+      CA_AUDIT_DIR: /data/audit
+      CA_AUDIT_RETENTION_DAYS: ${CA_AUDIT_RETENTION_DAYS:-14}
       LOG_LEVEL: ${LOG_LEVEL:-info}
     secrets:
       # KEK（CA の鍵を暗号化する鍵）。DB とは別のファイルで渡す（§6.1）。コンテナは UID 65532 で動くので、この UID で読めるようにする。
       - kek
     volumes:
-      # SQLite（暗号化した CA の鍵を含む）と管理API のサーバー証明書。
+      # SQLite（暗号化した CA の鍵を含む）、管理API のサーバー証明書、監査ログの日ごとのファイル。
       - ca-data:/data
     # 管理API（9448）と配布の口（8449）は、トンネル（WireGuard など）のアドレスだけで公開する（§4）。
     # 画面（8448）は公開しない（同じ compose の cloudflared から届く）。

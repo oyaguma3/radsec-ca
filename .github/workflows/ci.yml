@@ -93,6 +93,26 @@ jobs:
           jq -e '.services["radsec-ca"].read_only == true and .services["radsec-ca"].cap_drop == ["ALL"]' config.json
           jq -e '.services.cloudflared.command | index("--token-file") != null' config.json
           grep -q 'create_host_path: false' compose.yaml
+          # 管理モードの重ね合わせ: 管理API は公開せず、共有のネットワークで受ける。ピンを secrets で渡す。
+          mkdir -p secrets && : > secrets/admin-clients
+          docker compose -f compose.yaml -f compose.managed.yaml -f compose.fluent-bit.yaml config --format json > managed.json
+          jq -e '[.services["radsec-ca"].ports[] | "\(.host_ip):\(.published)->\(.target)"] == ["100.64.0.10:8449->8449"]' managed.json
+          jq -e '.services["radsec-ca"].networks | keys | sort == ["aka-provisioner", "default"]' managed.json
+          jq -e '.networks["aka-provisioner"].external == true' managed.json
+          jq -e '[.services["radsec-ca"].secrets[].source] | sort == ["admin-clients", "kek"]' managed.json
+          jq -e '.services["radsec-ca"].logging.options.tag == "app.radsec-ca" and .services.cloudflared.logging.options.tag == "app.radsec-ca-cloudflared"' managed.json
+          # 単独モードの土台には環境変数のピンもピンのファイルもない。
+          ! jq -e '.services["radsec-ca"].environment | has("CA_ADMIN_CLIENTS")' config.json
+          jq -e '[.services["radsec-ca"].secrets[].source] == ["kek"]' config.json
           # 必須の設定が空なら、compose が断る。
           sed -i -e 's|^CA_BIND_ADDR=.*|CA_BIND_ADDR=|' .env
           ! docker compose config -q 2>/dev/null
+
+  guide:
+    name: 運用ガイドの手順の通し確認
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - name: 管理モードの手順を compose で流す
+        run: scripts/check-guide.sh

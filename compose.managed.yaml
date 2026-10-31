@@ -1,0 +1,36 @@
+# 管理モード（MVP セットの管理面のノードで aka-provisioner と並べて動かす）のときに重ねる設定（設計概要 §19.8 の CA14）。
+#
+# - 管理API（9448）はホストに公開せず、aka-provisioner と共有の Docker のネットワークで受ける（https://radsec-ca:9448）。
+#   aka-provisioner の compose を先に起動する（共有のネットワークを作るため）。
+# - 配布の口（8449）はトンネル（CA_BIND_ADDR）に公開したまま（エッジが取りに来る）。
+# - 管理クライアントのピンのファイル secrets/admin-clients を渡す（1 行に 識別名=フィンガープリント。SIGHUP で読み直す）。
+#   コンテナは UID 65532 で動くので、この UID で読めるようにする。
+# - 監査ログの日ごとのファイルをホストの ./audit に書く（監視用の PC が取りに行く）。UID 65532 で書けるようにする。書けなければ起動しない。
+#
+# .env の COMPOSE_FILE=compose.yaml:compose.managed.yaml にすると、素の docker compose でも重なる（運用ガイド 3 章）。
+services:
+  radsec-ca:
+    environment:
+      CA_TLS_HOSTS: ${CA_TLS_HOSTS:-radsec-ca}
+    secrets:
+      - admin-clients
+    volumes:
+      - ./audit:/data/audit
+    ports: !override
+      - "${CA_BIND_ADDR:?.env に CA_BIND_ADDR（トンネルのアドレス）を設定してください}:8449:8449"
+    networks:
+      - default
+      - aka-provisioner
+
+  cloudflared:
+    networks:
+      - default
+
+secrets:
+  admin-clients:
+    file: ./secrets/admin-clients
+
+networks:
+  aka-provisioner:
+    external: true
+    name: ${PROVISIONER_SHARED_NETWORK:-aka-provisioner}

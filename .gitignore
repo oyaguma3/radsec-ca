@@ -26,3 +26,5 @@ coverage.*
 # KEK と Cloudflare Tunnel のトークン（compose がマウントする）、バックアップ
 /secrets/
 /backups/
+# 監査ログの日ごとのファイル（compose.managed.yaml がマウントする）
+/audit/
