@@ -1,11 +1,11 @@
 # radsec-ca 設計概要
 
-- 状態: 下書き（2026-10-18）。radsec-edge の設計概要（以下「エッジの設計概要」）の決定事項と §9（証明書と CA）をもとに、CA の詳しい作りを書いた。§17 の確認事項は 2026-10-18 にすべて推奨案で合意し（§3 の 6）、§16 のとおりエッジの設計概要に反映した。実装（エッジの段階 2）に入る前の確認事項（§18）も 2026-10-18 にすべて推奨案で合意した（§3 の 7）。2026-10-20 に、MVP セット（aka-mvpset）のための変更（持ち込みの CA と Box。§19）を加え（§3 の 8）、2026-10-21 に業者の製品の調べとラボの結果で改めた（§3 の 9）。2026-10-24 に、eMudhra の中間 CA の事案をもとに、持ち込みの CA を外す順番を加えた（§3 の 10）。
+- 状態: 下書き（2026-10-18）。radsec-edge の設計概要（以下「エッジの設計概要」）の決定事項と §9（証明書と CA）をもとに、CA の詳しい作りを書いた。§17 の確認事項は 2026-10-18 にすべて推奨案で合意し（§3 の 6）、§16 のとおりエッジの設計概要に反映した。実装（エッジの段階 2）に入る前の確認事項（§18）も 2026-10-18 にすべて推奨案で合意した（§3 の 7）。2026-10-20 に、MVP セット（aka-mvpset）のための変更（持ち込みの CA と Box。§19）を加え（§3 の 8）、2026-10-21 に業者の製品の調べとラボの結果で改めた（§3 の 9）。2026-10-24 に、eMudhra の中間 CA の事案をもとに、持ち込みの CA を外す順番を加えた（§3 の 10）。2026-10-31 に、MVP セットの段階 4-0 で持ち込みの CA・グループの証明書・ピンのファイル・監査ログのファイルを実装し、本文を実装に合わせて改めた（§3 の 11、§19.8）。
 - 対象: RadSec のエッジのための独立CA（コマンド名 `radsec-ca`。以下「本CA」）。
 - 関連:
   - radsec-edge: `docs/design-overview.md`（全体の構成、名前の規則 §8、証明書と CA §9、CA の API の概要 §12.2、主な流れ §14、段階 0 の実機の検証 §18）
-  - eapaka-node-provisioner（以下「provisioner」）: `docs/design-overview.md`（管理クライアントの認証 §10.1、操作者・トレースID・監査ログ §10.2）
-  - eapaka-ossbss-sample（以下「OSS/BSS」）: `docs/design-overview.md`（Cloudflare Access の JWT の検証 §5、画面の作り §4）
+  - [aka-provisioner](https://github.com/oyaguma3/aka-provisioner)（以下「provisioner」。eapaka-node-provisioner から作り直した。MVP セットのノード）: `docs/design-overview.md`
+  - [aka-ossbss](https://github.com/oyaguma3/aka-ossbss)（以下「OSS/BSS」。eapaka-ossbss-sample から作り直した。MVP セットのノード）: `docs/design-overview.md`
 - 手本にする実装: OSS/BSS（画面、Cloudflare Access、スキーマの移行）、provisioner（mTLS とフィンガープリント、ProblemDetails、監査ログ）、radsec-edge の `verify/v0/tools/cmd/certgen`（`crypto/x509` による CA・証明書・CRL の作成。段階 0 で radsecproxy が受け付けることを確かめた）
 
 ## 1. 位置づけ
@@ -14,7 +14,7 @@ AP のクライアント証明書と、エッジのサーバー証明書を発�
 
 ```
  [運用者のブラウザ] ─Cloudflare Access─> cloudflared ─HTTP─> 本CA の画面（8448）
- [provisioner] ──────mTLS（トンネルの中）──────────────────> 本CA の API（9448）     ── SQLite（CA の鍵は暗号化）
+ [provisioner] ──────mTLS（同じノードの共有のネットワーク）─> 本CA の API（9448）     ── SQLite（CA の鍵は暗号化）
  [エッジ 1..n] ──────HTTP（トンネルの中）──────────────────> 本CA の配布（8449）      ── KEK（ファイル）
                        CA の証明書と CRL（公開してよい情報）
 ```
@@ -47,6 +47,7 @@ AP のクライアント証明書と、エッジのサーバー証明書を発�
 | 8 | MVP セットのために、テナント専用の持ち込みの CA（自己署名に限る。CRL 必須）を登録し、その CRL を取り直して（またはアップロードを受けて）今の配布の口で配る。Box の証明書（`box-client`）を発行する（§19。エッジの決定事項 18）（決定事項 9 で改めた） | 2026-10-20 |
 | 9 | 持ち込みの CA は、自己署名でない CA（Meraki の RadSec 用の CA）も受ける（エッジは `PartialChain` で起点にする）。同じ CA を別のテナントに登録することは断る。CRL の取得先に Meraki の Dashboard API と「なし」（了承を記録し、エッジはそのテナントを `CRLCheck off` にする）を足す。Box の証明書を、AP のグループで共有するグループの証明書（`group-client`、SAN `urn:<接頭辞>:grp:...`）に広げる（§19。エッジの決定事項 19、aka-mvpset の決定事項 31〜35） | 2026-10-21 |
 | 10 | eMudhra の中間 CA の事案（2026-10-20 公表）による直接の影響はない。業者の CA の侵害・失効を知ったら、エッジからテナントの CA を外し終えてから、その持ち込みの CA を `disabled` にする（§19.2）。CSR の弱い鍵の検査は見送る（エッジの決定事項 20、エッジの設計概要 §24.9） | 2026-10-24 |
+| 11 | MVP セットの段階 4-0 の確認事項 CA1〜CA15 のとおりに実装する（§19.8）。主な変更: 登録は CRL が取れたときだけ成功、フィンガープリントの一意は有効な CA の中だけ、取得先を変える口を足す、停止で取得を止めて API キーを消す、取得先の内部のアドレスを断る、登録とグループの証明書の発行は API だけ、ピンはファイルと `SIGHUP`、監査ログの日ごとのファイル | 2026-10-31 |
 
 ## 4. 技術方針
 
@@ -59,7 +60,7 @@ AP のクライアント証明書と、エッジのサーバー証明書を発�
 | 口 | ポート | 待ち受けるアドレス | 認証 |
 |---|---|---|---|
 | 画面 | 8448（HTTP） | compose のネットワークの中（cloudflared からだけ受ける） | Cloudflare Access の JWT と、本CA の利用者の役割（§10） |
-| 管理API | 9448（HTTPS） | トンネルのアドレス | mTLS。クライアント証明書のフィンガープリント（§9.1） |
+| 管理API | 9448（HTTPS） | compose のネットワークの中（管理モードは provisioner との共有のネットワーク。§19.8 の CA14） | mTLS。クライアント証明書のフィンガープリント（§9.1） |
 | 配布 | 8449（HTTP） | トンネルのアドレス | なし（CA の証明書と CRL は署名つきで公開してよい情報） |
 
 - 配備: Docker Compose（本CA と cloudflared）。コンテナは distroless の nonroot。DB はボリューム、KEK は Docker の secrets（ファイル）で渡す。
@@ -73,8 +74,9 @@ AP のクライアント証明書と、エッジのサーバー証明書を発�
 | CA | ID | 数 | Subject | 鍵 | 有効期限 | 署名するプロファイル |
 |---|---|---|---|---|---|---|
 | サーバーCA | `server` | 1 つ（初期化のときに作る） | CN `<組織> RadSec server CA`、O `<組織>` | ECDSA P-256 | 10 年 | `tenant-server` |
-| テナントのクライアントCA | `tenant.<slug>` | テナントごと | CN `<slug> client CA`、O `<組織>` | ECDSA P-256 | 10 年 | `ap-client`、`probe-client` |
+| テナントのクライアントCA | `tenant.<slug>` | テナントごと | CN `<slug> client CA`、O `<組織>` | ECDSA P-256 | 10 年 | `ap-client`、`group-client`（§19.4）、`probe-client` |
 
+- 持ち込みの CA `brought.<slug>.<名前>` は鍵を持たず、署名しない（§19.2）。
 - どちらも自己署名。`BasicConstraints` は CA で `pathlen:0`（下に CA を作れない）、`KeyUsage` は `keyCertSign` と `cRLSign`。Subject Key Identifier を付ける。
 - CA の ID のテナントの部分は slug（エッジの設計概要 §8.1。英小文字・数字・`-`）。`.` は slug に入らないので、`tenant.<slug>` は一意に読める。slug は SAN と NAS-Identifier に入るので、変えない。
 - CA の状態は `active`（発行できる）と `disabled`（発行しない。CRL の作成と配布は続ける。§7.4）。
@@ -189,9 +191,9 @@ SQLite（WAL）。スキーマの移行は OSS/BSS と同じ自前の仕組み�
 
 | 表 | 主な項目 |
 |---|---|
-| `cas` | `id`（`server` / `tenant.<slug>`）、`kind`（`server` / `tenant-client`）、`tenant`、`cert_der`、`key_enc`、`key_nonce`、`kek_id`、`status`（`active` / `disabled`）、`crl_number`、`not_after`、`created_at`、`disabled_at` |
-| `certs` | `serial`（16 進。全体で一意）、`ca_id`、`profile`、`tenant`、`ap`、`edge`、`cn`、`san_dns`、`san_uri`、`not_before`、`not_after`、`cert_der`、`pubkey_sha256`、`revoked_at`、`revoke_reason`、`issued_by`（操作者）、`trace_id`、`created_at` |
-| `crls` | `ca_id`、`number`、`this_update`、`next_update`、`der`、`created_at` |
+| `cas` | `id`（`server` / `tenant.<slug>` / `brought.<slug>.<名前>`）、`kind`（`server` / `tenant-client` / `tenant-brought`）、`tenant`、`cert_der`、`key_enc`、`key_nonce`、`kek_id`、`status`（`active` / `disabled`）、`crl_number`、`not_after`、`created_at`、`disabled_at`、持ち込みの CA の項目（§19.5） |
+| `certs` | `serial`（16 進。全体で一意）、`ca_id`、`profile`、`tenant`、`ap`、`edge`、`grp`、`cn`、`san_dns`、`san_uri`、`not_before`、`not_after`、`cert_der`、`pubkey_sha256`、`revoked_at`、`revoke_reason`、`issued_by`（操作者）、`trace_id`、`created_at` |
+| `crls` | `ca_id`、`number`（CA ごとのこちらの連番）、`this_update`、`next_update`、`der`、`created_at`、`ext_number`（持ち込みの CRL の `cRLNumber`。§19.5） |
 | `users` | `email`、`role`（`admin` / `viewer`）、`enabled`、`created_at`（画面の利用者。§10） |
 | `audit` | `id`、`time`、`operator`、`mgmt_client`（API のとき）、`source`（`api` / `gui` / `cli`）、`action`、`target`、`trace_id`、`result`、`details` |
 | `idempotency` | `mgmt_client`、`key`、`req_hash`、`status`、`response`、`expires_at`（§9.2） |
@@ -205,26 +207,27 @@ SQLite（WAL）。スキーマの移行は OSS/BSS と同じ自前の仕組み�
 
 ### 9.1 認証・ヘッダー・エラー
 
-- mTLS 必須。管理クライアントは `CA_ADMIN_CLIENTS`（`識別名=フィンガープリント,...`）で静的に設定する（provisioner の `PROVISIONER_ADMIN_CLIENTS` と同じ形）。識別名は監査ログの `mgmt_client` になる。空なら API を待ち受けない（単独モードで画面だけを使う場合）。
-- サーバー証明書は自己署名（ファイルがなければ起動時に作り、ボリュームに保存する。SAN は `CA_TLS_HOSTS`）。`radsec-ca server-cert` で PEM とフィンガープリントを表示し、provisioner に検証用として渡す。本CA の発行する証明書とは別のものである（エッジの設計概要 §9.1）。
+- mTLS 必須。管理クライアントはピンのファイル（`CA_ADMIN_CLIENTS_FILE`。1 行に `識別名=フィンガープリント`。aka-vecgen・aka-radius・aka-provisioner と同じ形）で設定し、`SIGHUP` で読み直す。同じ識別名に新旧 2 つのフィンガープリントを書ける（入れ替えの間は両方を受ける）。読み直しに失敗したら前の設定のまま続ける。識別名は監査ログの `mgmt_client` になる。ファイルがなければ API を待ち受けない（単独モードで画面だけを使う場合）。ファイルがあって読めない・1 つもないときは起動しない。
+- サーバー証明書は自己署名（ファイルがなければ起動時に作り、ボリュームに保存する。SAN は `CA_TLS_HOSTS`）。`radsec-ca server-cert` で PEM とフィンガープリントを表示し、provisioner に検証用として渡す。`radsec-ca replace-server-cert` で作り直し、`SIGHUP` で読み直す。本CA の発行する証明書とは別のものである（エッジの設計概要 §9.1）。
 - TLS 1.2 以上。
 - `X-Operator-Id`（`^[A-Za-z0-9._@-]{1,64}$`）、`X-Trace-ID`（受け取るか採番し、応答のヘッダーで返す）。
-- エラーは ProblemDetails（`application/problem+json`）で、`cause` に理由の符号を入れる（provisioner と同じ）。主な `cause`: `VALIDATION_ERROR`、`CSR_INVALID`、`KEY_TYPE_UNSUPPORTED`、`NAME_RESERVED`、`CA_NOT_FOUND`、`CA_EXISTS`、`CA_DISABLED`、`CERT_NOT_FOUND`、`IDEMPOTENCY_CONFLICT`、`SYSTEM_FAILURE`。
+- エラーは ProblemDetails（`application/problem+json`）で、`cause` に理由の符号を入れる（provisioner と同じ）。主な `cause`: `VALIDATION_ERROR`、`CSR_INVALID`、`KEY_TYPE_UNSUPPORTED`、`NAME_RESERVED`、`CA_NOT_FOUND`、`CA_EXISTS`、`CA_DISABLED`、`CA_FINGERPRINT_IN_USE`、`CERT_NOT_FOUND`、`CRL_NOT_FOUND`、`CRL_INVALID`、`CRL_REQUIRED`、`TENANT_ONLY_NOT_CONFIRMED`、`NO_CRL_NOT_ACCEPTED`、`IDEMPOTENCY_CONFLICT`、`SYSTEM_FAILURE`。
 
 ### 9.2 冪等
 
-証明書の発行は、同じ要求を 2 回送ると 2 枚できてしまう。発行・失効・CA の作成と停止には `Idempotency-Key` を必須とし、同じ鍵・同じ本文の再送には前の応答を返す（本文が違えば 409 `IDEMPOTENCY_CONFLICT`）。保持は 24 時間。provisioner の再送の判定と同じ考え方である。
+証明書の発行は、同じ要求を 2 回送ると 2 枚できてしまう。発行・失効・CA の作成と登録と停止・CRL の取得先の変更と置き直しには `Idempotency-Key` を必須とし、同じ鍵・同じ本文の再送には前の応答を返す（本文が違えば 409 `IDEMPOTENCY_CONFLICT`）。保持は 24 時間。provisioner の再送の判定と同じ考え方である。
 
 ### 9.3 口
 
 | 口 | 内容 |
 |---|---|
 | `GET /status` | 版、KEK の識別子、CA の数、CA ごとの状態・期限・最新の CRL の番号と nextUpdate・作り直しの失敗、期限の近い証明書の数（30 日以内）、`CA_URN_PREFIX` と `CA_DNS_DOMAIN` |
-| `GET /cas` / `GET /cas/{caId}` | CA の一覧と詳細（証明書の PEM を含む） |
-| `POST /cas` | テナントのクライアントCA の作成（本文: `tenant`）。あれば 409 `CA_EXISTS` |
-| `POST /cas/{caId}/disable` | テナントをやめる（§7.4） |
-| `POST /certs` | 発行（本文: `profile`、`tenant`、`ap` または `edge`、`csr`）。応答: シリアル番号、証明書の PEM、有効期限、署名した CA の ID と証明書の PEM |
-| `GET /certs` | 一覧（絞り込み: `tenant`、`profile`、`ap`、`edge`、`status`=`valid` / `revoked` / `expired`、`expiresBefore`）。ページ送りつき |
+| `GET /cas` / `GET /cas/{caId}` | CA の一覧（`tenant` で絞れる）と詳細（証明書の PEM を含む） |
+| `POST /cas` | テナントのクライアントCA の作成（本文: `tenant`）か、持ち込みの CA の登録（本文に `kind`=`brought`。§19.5）。あれば 409 `CA_EXISTS` |
+| `POST /cas/{caId}/disable` | テナントをやめる（§7.4）。持ち込みの CA の停止（§19.2） |
+| `PUT /cas/{caId}/crl` / `POST /cas/{caId}/crl:refresh` / `PUT /cas/{caId}/crl-source` | 持ち込みの CA の CRL を置く・すぐ取りに行く・取得先を変える（§19.5） |
+| `POST /certs` | 発行（本文: `profile`、`tenant`、`ap`・`group`・`edge` のどれか、`csr`）。応答: シリアル番号、証明書の PEM、有効期限、署名した CA の ID と証明書の PEM |
+| `GET /certs` | 一覧（絞り込み: `tenant`、`profile`、`ap`、`group`、`edge`、`status`=`valid` / `revoked` / `expired`、`expiresBefore`）。ページ送りつき |
 | `GET /certs/{serial}` | 詳細 |
 | `POST /certs/{serial}/revoke` | 失効（本文: `reason`）。CRL をすぐ作り直す |
 | `GET /cas/{caId}/crl` | 最新の CRL の番号・thisUpdate・nextUpdate と PEM（配布の口と同じ中身。provisioner から確かめるため） |
@@ -245,7 +248,7 @@ SQLite（WAL）。スキーマの移行は OSS/BSS と同じ自前の仕組み�
 | 画面 | 内容 | 役割 |
 |---|---|---|
 | ダッシュボード | CA ごとの状態・期限・CRL の番号と nextUpdate（作り直しの失敗の警告）、期限の近い証明書の数、KEK の識別子、設定（接頭辞、ドメイン） | 両方 |
-| CA の一覧・詳細 | CA の証明書の表示と取り出し、発行した証明書の数、CRL の履歴、テナントのクライアントCA の作成、停止 | 作成・停止は `admin` |
+| CA の一覧・詳細 | CA の証明書の表示と取り出し、発行した証明書の数、CRL の履歴、テナントのクライアントCA の作成、停止。持ち込みの CA の状態・取り直し・アップロード・停止（§19.5） | 作成・停止・取り直し・アップロードは `admin` |
 | 証明書の一覧・詳細 | 絞り込み（テナント、プロファイル、状態、期限の近いもの）、証明書の取り出し、失効 | 失効は `admin` |
 | 署名（単独モード） | プロファイルと名前の材料を選び、CSR を貼り付けて署名し、証明書を取り出す。エッジの画面から取り出した CSR（サーバー・probe）と、AP の CSR に使う | `admin` |
 | 利用者 | 利用者の追加・役割の変更・無効化 | `admin` |
@@ -264,6 +267,8 @@ SQLite（WAL）。スキーマの移行は OSS/BSS と同じ自前の仕組み�
 | テナントの RadSec の有効化（§14.2） | `POST /cas`（`tenant`） |
 | テナントをエッジに置く（§14.2） | エッジが作った CSR で `POST /certs`（`tenant-server`、`probe-client`。どちらも `tenant`・`edge`） |
 | AP の登録（§14.3） | AP が作った CSR で `POST /certs`（`ap-client`、`tenant`・`ap`） |
+| グループの登録 | 顧客が作った CSR で `POST /certs`（`group-client`、`tenant`・`group`。§19.4） |
+| 持ち込みの CA の登録・取得先の変更・停止 | `POST /cas`（`kind`=`brought`）、`PUT /cas/{caId}/crl-source`、`POST /cas/{caId}/disable`（§19.2・§19.5） |
 | AP の削除（§14.4） | `POST /certs/{serial}/revoke`（`cessationOfOperation`）。その後、provisioner がエッジに `crl:refresh` を送る |
 | 証明書の更新（§14.5） | 新しい CSR で `POST /certs`、古い証明書を `superseded` で失効 |
 | テナントをやめる | `POST /cas/{caId}/disable` |
@@ -289,21 +294,25 @@ SQLite（WAL）。スキーマの移行は OSS/BSS と同じ自前の仕組み�
 | `CA_DNS_DOMAIN` | サーバー証明書の SAN のドメイン（`primary.<テナント>.<ドメイン>`） | — （必須） |
 | `CA_DB_PATH` | SQLite のファイル | `/data/radsec-ca.db` |
 | `CA_KEK_FILE` | KEK のファイル | `/run/secrets/kek` |
-| `CA_ADMIN_CLIENTS` | 管理クライアント（`識別名=フィンガープリント,...`） | 空（API を待ち受けない） |
+| `CA_ADMIN_CLIENTS_FILE` | 管理クライアントのピンのファイル（§9.1）。ファイルがなければ API を待ち受けない | `/run/secrets/admin-clients` |
 | `CA_TLS_HOSTS` | 管理API のサーバー証明書の SAN | — |
 | `CA_API_ADDR` / `CA_PUBLISH_ADDR` / `CA_GUI_ADDR` | 待ち受けのアドレス | `:9448` / `:8449` / `:8448` |
 | `CA_ACCESS_TEAM_DOMAIN` / `CA_ACCESS_AUD` / `CA_INITIAL_ADMIN_EMAIL` | 画面の認証（§10.1） | — |
-| `CA_AP_CERT_DAYS` / `CA_SERVER_CERT_DAYS` | 有効期限（§5.2） | `730` / `365` |
+| `CA_AP_CERT_DAYS` / `CA_GROUP_CERT_DAYS` / `CA_SERVER_CERT_DAYS` | 有効期限（§5.2、§19.4） | `730` / `730` / `365` |
 | `CA_CRL_VALIDITY` / `CA_CRL_REFRESH` | CRL の nextUpdate と作り直しの間隔（§7.2） | `168h` / `24h` |
+| `CA_BROUGHT_CRL_REFRESH` / `CA_BROUGHT_CRL_TIMEOUT` | 持ち込みの CA の CRL を取りに行く間隔と 1 回の上限（§19.3。上限は 25 秒まで） | `1h` / `20s` |
+| `CA_BROUGHT_CRL_ALLOW_PRIVATE` | CRL の取得先に内部のアドレスを許す（試験用。§19.3） | `false` |
+| `CA_MERAKI_API_BASE` | Meraki の Dashboard API の入口（§19.3） | `https://api.meraki.com/api/v1` |
+| `CA_AUDIT_DIR` / `CA_AUDIT_RETENTION_DAYS` | 監査ログの日ごとのファイルのディレクトリと保存の日数（§13） | DB と同じディレクトリの `audit` / `14` |
 | `LOG_LEVEL` | ログの段階 | `INFO` |
 
-コマンド: `radsec-ca serve`（既定）、`radsec-ca gen-kek -out <ファイル>`、`radsec-ca rotate-kek`、`radsec-ca backup`、`radsec-ca server-cert`。初めて起動したときに、DB の作成、サーバーCA の作成、最初の管理者の作成を行う。
+コマンド: `radsec-ca serve`（既定）、`radsec-ca gen-kek -out <ファイル>`、`radsec-ca rotate-kek`、`radsec-ca backup`、`radsec-ca server-cert`、`radsec-ca replace-server-cert`。初めて起動したときに、DB の作成、サーバーCA の作成、最初の管理者の作成を行う。
 
 ## 13. ログと監査ログ
 
-- アプリケーションログは JSON（`log/slog`）で標準出力に出す。`event_id` を付ける（例: `CA_STARTED`、`CA_CERT_ISSUED`、`CA_CERT_REVOKED`、`CA_CRL_PUBLISHED`、`CA_CRL_FAILED`、`CA_KEK_MISMATCH`、`CA_AUTH_REJECTED`）。`trace_id` を付ける。
-- 監査ログは DB の `audit` に残し、標準出力にも出す。残すのは、CA の作成・停止、発行、失効、利用者の変更、KEK の入れ替え、バックアップ。`details` には、プロファイル、名前の材料、シリアル番号、公開鍵の SHA-256 を入れる（CSR と証明書の本体は入れない）。
-- 鍵、KEK、JWT はログに出さない。
+- アプリケーションログは JSON（`log/slog`）で標準出力に出す。`event_id` を付ける（例: `CA_STARTED`、`CA_CERT_ISSUED`、`CA_CERT_REVOKED`、`CA_CRL_PUBLISHED`、`CA_CRL_FAILED`、`CA_BROUGHT_CRL_UPDATED`、`CA_BROUGHT_CRL_FAILED`、`CA_KEK_MISMATCH`、`CA_AUTH_REJECTED`、`CA_ADMIN_CLIENTS_RELOADED`、`CA_ADMIN_CLIENTS_RELOAD_ERR`、`CA_SERVER_CERT_RELOADED`、`CA_SERVER_CERT_RELOAD_ERR`、`CA_AUDIT_WRITE_ERR`、`CA_AUDIT_DIR_ERR`、`CA_AUDIT_FILE_ERR`）。`trace_id` を付ける。管理モードでは Fluent Bit で管理面のノードのファイルに送る（`compose.fluent-bit.yaml`）。
+- 監査ログは DB の `audit` に残し、標準出力と日ごとのファイル（`CA_AUDIT_DIR`。1 行 1 件の JSON、日本時間の日付ごと、前の日までは gzip、14 日で消す。ほかのノードと同じ形で、監視用の PC が取りに行く）にも出す。残すのは、CA の作成・登録・停止、CRL の取得先の変更・取り直し・アップロード、発行、失効、利用者の変更、KEK の入れ替え、バックアップ、サーバー証明書の作り直し。`details` には、プロファイル、名前の材料、シリアル番号、公開鍵の SHA-256 を入れる（CSR と証明書の本体は入れない）。
+- 鍵、KEK、JWT、Meraki の API キーはログに出さない。
 
 ## 14. 試験
 
@@ -370,9 +379,11 @@ SQLite（WAL）。スキーマの移行は OSS/BSS と同じ自前の仕組み�
 | ID | `brought.<slug>.<名前>`（名前はエッジの設計概要 §8.1 の規則。`.` は slug と名前に入らないので一意に読める） |
 | 種類 | `cas.kind` = `tenant-brought`。CA の証明書だけを持ち、鍵は持たない（本CA は署名しない） |
 | 登録のときの確かめ | PEM の CA の証明書が 1 つ。`BasicConstraints` が CA、`KeyUsage` に `keyCertSign`、有効期限の中。自己署名か否かを記録する（自己署名でない CA は、エッジで `PartialChain on` にして起点にする。エッジの設計概要 §24.5） |
-| テナント専用 | 登録する人が「このテナント専用の CA であることを確かめた」と明示し、監査ログに残す。**同じ CA（証明書の SHA-256 フィンガープリント）を別のテナントに登録することは断る**（1 テナント = 1 業者の組織）。全顧客で共通の CA は受けない |
+| 登録のときの確かめの追加 | CRL を配る CA は `KeyUsage` に `cRLSign` も求める（ないと CRL を検証できない）。鍵は ECDSA P-256 / P-384 / P-521 か RSA 2048 ビット以上（業者の鍵はこちらで選べないので、CSR より広く受ける） |
+| テナント専用 | 登録する人が「このテナント専用の CA であることを確かめた」と明示し、監査ログに残す。**同じ CA（証明書の SHA-256 フィンガープリント）を有効なまま別のテナントに登録することは断る**（1 テナント = 1 業者の組織。止めた CA は数えない。行は消さないので、全行で一意にすると誤って止めたときや顧客がテナントを移るときに登録し直せないため）。全顧客で共通の CA は受けない |
 | CRL の取得先 | `url`（URL から取る）、`meraki`（Meraki の Dashboard API から取る）、`upload`（アップロードを受ける）、`none`（CRL がない）のどれか（§19.3） |
-| 状態 | `active` / `disabled`。`disabled` にしても、エッジからテナントの CA を外し終わるまで CRL の取得と配布を続ける（§7.4 と同じ考え方） |
+| 状態 | `active` / `disabled`。`disabled` にすると CRL の取得を止め、Meraki の API キーを消す。最新の CRL は配り続ける。手順はエッジから外し終えてから止める順なので、止めた後の取得は要らない。外さずに止めると、CRL が更新されず、`nextUpdate` を過ぎるとその CA の AP の新しい接続は拒否される（接続を許してしまう側ではなく、拒否する側に倒れる） |
+| 名前 | 止めた CA の ID（名前）は使い回さない。同じ CA を入れ直すときは別の名前で登録する |
 
 - 自己署名でない CA を受けるのは、エッジの radsecproxy に `PartialChain` のパッチを当てたためである（エッジの設計概要 §24.5）。束に置くのはその CA だけで、上位の CA（業者の共通のルートなど）は置かない（置くと、他の顧客の証明書も検証を通るため）。
 - 業者の CA の入れ替え（Meraki の Keeper から PureCA への移行のような）に備え、同じテナントに複数の持ち込みの CA を登録できる。
@@ -383,13 +394,17 @@ SQLite（WAL）。スキーマの移行は OSS/BSS と同じ自前の仕組み�
 | 取得先 | 取り方 |
 |---|---|
 | `url` | `CA_BROUGHT_CRL_REFRESH`（案: 1 時間）ごとに取りに行く（`If-None-Match` / `If-Modified-Since`、タイムアウトは `CA_BROUGHT_CRL_TIMEOUT`、案: 30 秒）。HTTP と HTTPS の両方を受ける（CRL は署名で守られるため） |
-| `meraki` | Meraki の Dashboard API の `GET /organizations/{organizationId}/wireless/devices/radsec/certificates/authorities/crls`（`certificateAuthorityIds` で絞れる）を、同じ間隔で呼ぶ。応答の `items` の中から、登録した CA が発行した CRL（発行者と署名で照合する）を選ぶ。差分の CRL（`.../crls/deltas`）は使わない（エッジの radsecproxy が差分の CRL を使わないため）。組織の ID と API キー（顧客に読み取り専用の管理者のキーを出してもらう）を登録し、API キーは KEK で暗号化して持つ |
-| `upload` | 管理API（`PUT /cas/{caId}/crl`）か画面から、PEM か DER の CRL を受ける |
+| `meraki` | Meraki の Dashboard API の `GET /organizations/{organizationId}/wireless/devices/radsec/certificates/authorities/crls` を、同じ間隔で呼ぶ（`Authorization: Bearer`）。応答の `items[].crl`（PEM）の中から、登録した CA が発行した CRL（発行者と署名で照合する。複数あれば `thisUpdate` の新しいもの）を選ぶ。公開の資料にページ送りの説明がないので、見つからず `meta.counts.items.remaining` が 0 より大きければ、取りこぼしを見逃さないよう失敗にする。リダイレクトは同じドメインの下にだけ API キーを付け直す。差分の CRL（`.../crls/deltas`）は使わない（エッジの radsecproxy が差分の CRL を使わないため）。組織の ID と API キー（顧客に読み取り専用の管理者のキーを出してもらう）を登録し、API キーは KEK で暗号化して持つ（AAD は `<id>/meraki-key`。`rotate-kek` と起動の確認の対象）。応答・ログ・監査ログに出さず、「設定済みか」だけを返す |
+| `upload` | 管理API（`PUT /cas/{caId}/crl`。PEM）か画面（PEM か DER）から、CRL を受ける（1 MiB まで）。人が置き忘れると期限が切れる |
 | `none` | CRL を配らない。エッジはそのテナントを `CRLCheck off` にし、共通のブロックを業者の証明書の形で絞る（エッジの設計概要 §24.3）。登録する人が「CRL がなく、業者の AP の失効が効かないこと」を了承したと明示し、監査ログに残す |
 
-- `url`・`meraki`・`upload` では、置く前に次を確かめる: 持ち込みの CA の証明書で署名が検証できる、nextUpdate が未来、`cRLNumber` があれば今の CRL の番号より小さくない。通らなければ置かずに今の CRL を残し、`/status` と画面に出す。
-- 本CA は持ち込みの CRL に署名し直さず、受け取ったものをそのまま `crls` に残して、今の配布の口（`GET /crl/{caId}.pem` / `.der`。§7.3）で配る。エッジは今と同じく CA の証明書で署名を確かめる。`ETag` は CRL の中身のハッシュから作る。
-- nextUpdate までの残りが閾値（案: 3 日。業者の CRL の nextUpdate がそれより短いときは、その半分）を切ったら、`/status` と画面で警告する。取得の失敗が続いたときも同じ。
+- **登録と取得先の変更は、その場で CRL が取れて確かめられたときだけ成功する**（`none` を除く）。失敗なら何も残さない（CA の行は消さない作りなので、誤った取得先を残さないため。CRL がないまま `CRLCheck on` で置くと、その CA の AP が拒否されるため）。取得の 1 回の上限は `CA_BROUGHT_CRL_TIMEOUT`（既定 20 秒、上限 25 秒）。呼び出し側は、aka-provisioner の `ca` のタイムアウトを 30 秒に、aka-ossbss のこの呼び出しを 35 秒にする（段階 4-2・4-3）。
+- `url`・`meraki`・`upload` では、置く前に次を確かめる: 発行者が持ち込みの CA の Subject と一致する、持ち込みの CA の証明書で署名が検証できる、差分の CRL でない、`thisUpdate` が未来でない（5 分のずれは許す）、`nextUpdate` があって未来、`cRLNumber` があれば今の CRL の番号より小さくない（なければ `thisUpdate` が後退していない）。古い CRL を置かれると失効が取り消されたように見えるので、後退を断る。通らなければ置かずに今の CRL を残し、`/status` と画面に出す。中身が今と同じなら記録しない。
+- 定期の取得は 1 時間ごと、同時に 5 件まで（テナント 1,000 でも 1 時間に収まる）。
+- 本CA は持ち込みの CRL に署名し直さず、受け取ったものをそのまま `crls` に残して、今の配布の口（`GET /crl/{caId}.pem` / `.der`。§7.3）で配る。エッジは今と同じく CA の証明書で署名を確かめる。`ETag` は今と同じくこちらの連番から作る（`crls.number` は CRL を置くたびに増える）。`none` の CA の CRL は配らない（404。CA の証明書は配る）。
+- nextUpdate までの残りが閾値（3 日。業者の CRL の有効期間がその 2 倍より短いときは、その半分）を切ったら、`/status` と画面で警告する。3 回続けて取得に失敗したときも同じ。
+- **業者の CRL の猶予は、本CA の CRL の 7 日（§7.2）ではなく、業者の `nextUpdate` 次第である**。本CA が止まっている間に業者の CRL の期限が切れると、その CA の AP の新しい接続は拒否される。
+- **取得先への通信の守り**: 本CA は管理面の内部にあるので、URL に内部のアドレスを書かれても内部へ接続しない。`http`・`https` だけ、リダイレクトは 3 回まで、応答は 8 MiB まで。接続する瞬間に解決した IP を確かめ、ループバック・プライベート（`10/8`・`172.16/12`・`192.168/16`・`fc00::/7`）・リンクローカル・`100.64.0.0/10`（WireGuard や Tailscale で使う）・マルチキャストなどなら断る（名前解決の結果を後から変える手口にも効く）。`CA_BROUGHT_CRL_ALLOW_PRIVATE` は試験用で、本番では使わない。
 - `url` と `meraki` では、管理面のノードから業者の口へ外向きに出る通信を、ファイアウォールで許す必要がある。
 - Meraki の CRL の中身（どの CA の CRL が返るか、nextUpdate の長さ、AP を組織から外したときに失効として載るか）は、実機の組織で確かめるまで推定である（aka-mvpset の概要 §19）。
 
@@ -411,10 +426,10 @@ SQLite（WAL）。スキーマの移行は OSS/BSS と同じ自前の仕組み�
 |---|---|
 | `cas` | `kind` に `tenant-brought` を足す（`key_enc`・`key_nonce`・`kek_id` は空）。`self_signed`、`fingerprint_sha256`（全体で一意）、`crl_source`（`issued` / `url` / `meraki` / `upload` / `none`）、`crl_url`、Meraki の組織の ID と暗号化した API キー、取得の状態（`ETag`、最後に試みた時刻と結果）、テナント専用と CRL なしの了承をした操作者と時刻を足す |
 | `certs` | `grp`（グループの名前。`profile` が `group-client` のとき）を足す |
-| `crls` | 持ち込みの CA の CRL も同じ表に残す（`number` は `cRLNumber`。なければ空） |
-| 管理API | `POST /cas` に持ち込みの CA の登録（本文: `tenant`、`kind`=`brought`、`name`、`certPem`、`crl`（`source` と、`url` か `merakiOrgId`・`merakiApiKey` か `pem`）、`tenantOnlyConfirmed`、`noCrlAccepted`）。`PUT /cas/{caId}/crl`（アップロード）。`POST /cas/{caId}/crl:refresh`（すぐ取りに行く）。`POST /certs` に `group-client`（`tenant`・`group`）。`GET /cas/{caId}` に自己署名か・CRL の有無を加える（エッジの `CRLCheck` と `PartialChain` を決めるのに使う）。`GET /status` に持ち込みの CA の CRL の状態 |
-| 画面 | 持ち込みの CA の登録・一覧・停止、CRL の状態と取り直し・アップロード、グループの証明書の発行と失効 |
-| 設定 | `CA_BROUGHT_CRL_REFRESH`（`1h`）、`CA_BROUGHT_CRL_TIMEOUT`（`30s`）、`CA_GROUP_CERT_DAYS`（`730`） |
+| `crls` | 持ち込みの CA の CRL も同じ表に残す。`number` はこちらの連番で、業者の `cRLNumber` は `ext_number` に 10 進の文字列で持つ（最大 20 バイトで整数の列に入らず、ないこともある） |
+| 管理API | `POST /cas` に持ち込みの CA の登録（本文: `tenant`、`kind`=`brought`、`name`、`certPem`、`crl`（`source` と、`url` か `merakiOrgId`・`merakiApiKey` か `pem`）、`tenantOnlyConfirmed`、`noCrlAccepted`）。`GET /cas?tenant=`。`PUT /cas/{caId}/crl`（アップロード）。`POST /cas/{caId}/crl:refresh`（すぐ取りに行く）。`PUT /cas/{caId}/crl-source`（取得先の変更。新しい取得先から取れると確かめてから替える。API キーの入れ替えや URL の変更に使う。`none` との間で替えるとエッジの `CRLCheck` が変わるので、OSS/BSS が反映し直す）。`POST /certs` に `group-client`（`tenant`・`group`）。`GET /cas/{caId}` に自己署名か・CRL の有無を加える（エッジの `CRLCheck` と `PartialChain` を決めるのに使う）。`GET /status` に持ち込みの CA の CRL の状態。要求の本文の上限を 1 MiB に上げる（provisioner と同じ） |
+| 画面 | 持ち込みの CA の一覧・状態、CRL の取り直し・アップロード、停止。グループの証明書の一覧・失効。**登録、取得先の変更、グループの証明書の発行は API だけ**（登録の確認と台帳は OSS/BSS にあり、入口が 2 つあると台帳とずれる。単独モードのエッジは持ち込みの CA もグループも使わない） |
+| 設定 | `CA_BROUGHT_CRL_REFRESH`（`1h`）、`CA_BROUGHT_CRL_TIMEOUT`（`20s`）、`CA_BROUGHT_CRL_ALLOW_PRIVATE`（`false`）、`CA_MERAKI_API_BASE`、`CA_GROUP_CERT_DAYS`（`730`） |
 | `cause` | `CA_FINGERPRINT_IN_USE`、`CRL_INVALID`、`CRL_REQUIRED`、`TENANT_ONLY_NOT_CONFIRMED`、`NO_CRL_NOT_ACCEPTED` を足す |
 
 ### 19.6 確かめたこと
@@ -423,5 +438,27 @@ V14（radsecproxy が自己署名でない CA を信頼の起点にできるか�
 
 ### 19.7 進め方
 
-- エッジの段階 4 の中で、エッジの管理API（4-1）と並べて行う（4-2 で provisioner が中継する前に終える）。
-- 本書の §5.1 の CA の表、§5.2 のプロファイルの表、§8 のデータ、§9.3 の口、§12 の設定への反映は、実装するときに行う。
+- MVP セットの段階 4 の最初の手順（4-0）として行った（aka-mvpset の概要 §18.9 の S4-1。エッジの管理API（4-1）と同時ではなく先に行い、エッジの試験で CA ごとの CRL と `group-client` の実物を使う）。
+
+### 19.8 段階 4-0 で決めたこと（2026-10-31。確認事項 CA1〜CA15 は推奨どおりで合意）
+
+| # | 決めたこと |
+|---|---|
+| CA1 | コミットの分け方: ① 文書 → ② スキーマと `group-client` → ③ 持ち込みの CA と CRL → ④ ピン・サーバー証明書・監査ログ → ⑤ 画面 → ⑥ compose・CI・運用ガイド |
+| CA2 | 移行 `0002`。SQLite は CHECK を変えられないので `cas`・`certs`・`crls` を作り直す。外部キーを有効にしたまま作り直せるよう、子の表を制約のない写しに移して消してから親を作り直す。`certs` の順序（`rowid`）を保つ |
+| CA3 | 登録のときの確かめに `cRLSign`（CRL を配るとき）と鍵の種類を足す（§19.2） |
+| CA4 | 登録と取得先の変更は、その場で CRL が取れたときだけ成功する（§19.3）。取得は 20 秒まで。aka-provisioner の `ca` のタイムアウトを 30 秒に（4-2）、aka-ossbss のこの呼び出しを 35 秒にする（4-3） |
+| CA5 | フィンガープリントの一意は有効な持ち込みの CA の中だけ（部分一意索引 `cas_brought_fingerprint`）。侵害された CA を止めた後に登録し直すことは技術的には防がず、システム管理者だけが登録できることと監査ログで防ぐ |
+| CA6 | `PUT /cas/{caId}/crl-source` を足す |
+| CA7 | 停止で取得を止め、API キーを消す（§19.2） |
+| CA8 | 取得先への通信の守り（§19.3）。`100.64.0.0/10` も断る |
+| CA9 | Meraki の応答は公開の資料どおり。偽の API で試し、実機は未確認のまま残す（aka-mvpset の概要 §19 の 2） |
+| CA10 | CRL の受け入れの確かめ（§19.3）。API の本文の上限を 1 MiB に上げる |
+| CA11 | Meraki の API キーの扱い（§19.3） |
+| CA12 | ピンのファイルと `SIGHUP`、`radsec-ca replace-server-cert`（§9.1）。環境変数 `CA_ADMIN_CLIENTS` は誤りにして、黙って無視しない |
+| CA13 | 監査ログの日ごとのファイル（§13）。行の形は aka-provisioner に `source`・`result` を足したもの。DB の `audit` は残す |
+| CA14 | 土台の `compose.yaml` は単独モードのまま。管理モードは `compose.managed.yaml` を重ねる（管理API は公開せず共有のネットワークで受ける、ピンの secrets、監査ログのディレクトリ `./audit`）。ログは `compose.fluent-bit.yaml`（タグ `app.radsec-ca`・`app.radsec-ca-cloudflared`。出力は aka-provisioner の Fluent Bit の設定に 4-2 で足す）。CI に手順の通し確認のジョブ（`scripts/check-guide.sh`）を足す |
+| CA15 | 画面の範囲（§19.5）。試験は単体、移行（`0001` から）、API と OpenAPI の突き合わせ、openssl の相互運用、手元の compose |
+
+- 確認事項にない小さな判断: 持ち込みの CA の登録の監査ログの操作は `ca.register`、CRL は `ca.crl.upload`・`ca.crl.refresh`・`ca.crl_source.change`。CRL のない CA の `GET /cas/{caId}/crl` は 404 `CRL_NOT_FOUND`。`rotate-kek` は先にスキーマを移行する（新しい版のイメージで起動する前に入れ替えるとき）。
+- radsec-edge の `scripts/e2e.sh` は固定のコミットの本CA を使うので、4-0 の間は壊れない。固定を上げるとき（4-1a）に、`CA_ADMIN_CLIENTS` をピンのファイルに直す。
