@@ -38,7 +38,7 @@ CA の ID はサーバーCA が `server`、テナントのクライアントCA �
 
 ## 開発
 
-- Go 1.27.3 が要ります。`go test ./...` で単体・結合の試験、`CA_TEST_OPENSSL=1 go test ./...` で openssl による相互運用の試験も動きます。
+- Go 1.27.4 が要ります。`go test ./...` で単体・結合の試験、`CA_TEST_OPENSSL=1 go test ./...` で openssl による相互運用の試験も動きます。
 - `scripts/check-guide.sh` は運用ガイドの管理モードの手順を compose で流して確かめます（CI のジョブと同じ）。
 - 画面の CSS は `sh scripts/build-css.sh` で作ります（Tailwind CSS のスタンドアロン CLI と daisyUI を、版を固定して取得します）。
 
