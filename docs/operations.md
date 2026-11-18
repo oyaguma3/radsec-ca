@@ -86,6 +86,8 @@ docker compose exec -T radsec-ca /radsec-ca server-cert > radsec-ca-server.pem
 3. aka-provisioner を新しい証明書に切り替える。
 4. 古い行を消して、もう一度 `SIGHUP` を送る。
 
+`docker compose kill -s SIGHUP` を送ったコンテナには Docker が「手で止めた」の印を付けるので、ホストを再起動すると `unless-stopped` でも起き上がらない（aka-mvpset の段階 5 の T5-15）。送った後に `docker compose up -d radsec-ca` を一度流して印を消す（動いているコンテナは作り直されない。サービスの名前を付けるので、cloudflared は起動しない）。aka-mvpset の配置では、起動のときに `aka-compose-up.service` が起こし直す。この後の章の `SIGHUP` も同じ。
+
 **ファイルはその場で書き換える。** `sed -i` や `mv` で置き換えると、動いているコンテナは単一ファイルのマウントで古い中身を読み続ける（`SIGHUP` を送っても変わらない）。置き換えたら `docker compose up -d --force-recreate radsec-ca` で作り直す。
 
 ### 3.3 サーバー証明書の入れ替え
